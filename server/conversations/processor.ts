@@ -5,8 +5,14 @@ import { nextOrderState, requiredOrderFields } from "../../shared/webasi";
 import { createConversationEngine, type StructuredReply } from "./engine";
 import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./sender";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
+import { createOrder, getSettings, recordEvent } from "../module-db";
+import { notifyOwner } from "../_core/notification";
 
 export type MessageProcessorDeps = {
+  claimMessage?: typeof claimWhatsAppMessage;
+  createOrder?: typeof createOrder;
+  recordEvent?: typeof recordEvent;
+  notifyOwner?: typeof notifyOwner;
   isOn?: boolean;
   getConversation?: typeof getConversation;
   saveConversation?: typeof saveConversation;
@@ -40,14 +46,19 @@ function mergeExtracted(snapshot: ConversationSnapshot, reply: StructuredReply) 
 export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, deps: MessageProcessorDeps = {}): Promise<ProcessResult> {
   const waId = message.waId ?? message.from;
   const clientId = internalClientId(waId);
+  const claim = deps.claimMessage ?? claimWhatsAppMessage;
+  const create = deps.createOrder ?? createOrder;
+  const event = deps.recordEvent ?? recordEvent;
+  const notify = deps.notifyOwner ?? notifyOwner;
   const getState = deps.getConversation ?? getConversation;
   const saveState = deps.saveConversation ?? saveConversation;
   const usage = deps.getUsageCounts ?? getUsageCounts;
   const increment = deps.incrementUsage ?? incrementUsage;
   const sendText = deps.sendText ?? createWhatsAppSender();
-  const isOn = deps.isOn ?? ENV.webasiEnabled;
+  const settings = await getSettings();
+  const isOn = deps.isOn ?? settings.webasiEnabled;
 
-  const claimed = await claimWhatsAppMessage({ messageId: message.id, waId, messageType: message.type });
+  const claimed = await claim({ messageId: message.id, waId, messageType: message.type });
   if (!claimed) return { accepted: true, duplicate: true, replied: false, reason: "duplicate_message" };
 
   const snapshot = await getState(clientId, waId, message.profileName);
@@ -68,6 +79,9 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
     if (snapshot.state === "awaiting_deposit") {
       snapshot.state = nextOrderState(snapshot.state, "slip_received");
       replyText = "Thanks — I’ve received the payment slip. The owner will verify the transfer and confirm your order.";
+      await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: "Restaurant Website Package", depositAmount: 34000, slipMediaId: message.image?.id, state: "slip_received", notes: "Payment slip received; owner verification required." });
+      await event({ eventType: "slip_received", severity: "warning", title: "Deposit slip received", detail: `A payment slip was received from ${message.profileName ?? waId}. Manual verification is required.`, clientId });
+      await notify({ title: "WEBASI: deposit slip received", content: `A payment slip was received from ${message.profileName ?? waId}. Open Orders to verify it manually. WEBASI has not confirmed payment.` }).catch(() => false);
     } else {
       await saveState(snapshot);
       return { accepted: true, replied: false, reason: "image_logged_outside_deposit_state", state: snapshot.state };
@@ -91,11 +105,31 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       const merged = mergeExtracted(snapshot, structured);
       snapshot.extractedFields = merged.extractedFields;
       snapshot.missingFields = merged.missingFields;
-      if (snapshot.state === "collecting" && snapshot.missingFields.length === 0) snapshot.state = nextOrderState(snapshot.state, "brief_complete");
+      if (structured.needsOwner) {
+        snapshot.state = "needs_owner";
+        await event({ eventType: "escalation", severity: "warning", title: "Conversation needs owner", detail: structured.needsOwnerReason ?? "The assistant could not safely answer the client.", clientId });
+        await notify({ title: "WEBASI: conversation needs you", content: `${message.profileName ?? waId}: ${structured.needsOwnerReason ?? "The assistant could not safely answer the client."}` }).catch(() => false);
+      }
+      if (snapshot.state === "collecting" && snapshot.missingFields.length === 0 && !structured.needsOwner) {
+        snapshot.state = nextOrderState(snapshot.state, "brief_complete");
+        const projectPrice = 85000;
+        const depositAmount = Math.round(projectPrice * 0.4);
+        replyText = `Great — I have everything for the Restaurant Website Package. The total is LKR ${projectPrice.toLocaleString("en-LK")} and the 40% deposit is LKR ${depositAmount.toLocaleString("en-LK")}.\n\n${settings.bankDetails}\n\nOnce you make the transfer, please send the slip here. The owner will verify it manually.`;
+        snapshot.state = "awaiting_deposit";
+        await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: "Restaurant Website Package", depositAmount, state: "awaiting_deposit", notes: "Brief complete; waiting for deposit slip." });
+      }
     } catch (error) {
       console.error("[WhatsApp] conversation engine failed", error);
+      await event({ eventType: "llm_failure", severity: "error", title: "Conversation engine unavailable", detail: "A neutral holding reply was prepared because the model call failed or was rate limited.", clientId });
+      await notify({ title: "WEBASI: AI engine needs attention", content: `The conversation engine failed for ${message.profileName ?? waId}. A neutral holding reply was used.` }).catch(() => false);
       replyText = "I’m having trouble checking that right now. I’ll ask the owner to follow up.";
     }
+  }
+
+  if (settings.shadowMode && replyText) {
+    await event({ eventType: "shadow_draft", severity: "info", title: "Shadow-mode draft created", detail: replyText, clientId });
+    await saveState(snapshot);
+    return { accepted: true, replied: false, reason: "shadow_mode", state: snapshot.state };
   }
 
   if (!replyText || !isOn || !withinWindow) {

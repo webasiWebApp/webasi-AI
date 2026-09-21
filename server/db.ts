@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, conversations, InsertConversation, usageCounters, whatsappMessages, users } from "../drizzle/schema";
+import { InsertUser, conversations, usageCounters, whatsappMessages, users, projects, settings, orders, eventLogs, insights } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 import type { OrderState } from "../shared/webasi";
 

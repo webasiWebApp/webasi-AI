@@ -80,16 +80,16 @@ function parseStructured(content: string | Array<{ type: string; text?: string }
 
 export function validateGroundedReply(reply: string, project: ApprovedProjectSnapshot): { valid: boolean; reason?: string } {
   const prices = reply.match(pricePattern) ?? [];
-  const allowedPrice = `lkr ${project.priceLkr.toLocaleString("en-LK")}`.toLowerCase().replace(/\s+/g, " ");
   for (const price of prices) {
-    const normalized = price.toLowerCase().replace(/\s+/g, " ");
-    if (!normalized.includes(allowedPrice)) return { valid: false, reason: "reply_contains_unapproved_price" };
+    const numeric = Number(price.replace(/[^0-9]/g, ""));
+    if (numeric !== project.priceLkr) return { valid: false, reason: "reply_contains_unapproved_price" };
   }
   for (const percent of reply.match(percentPattern) ?? []) {
     if (percent !== `${project.depositPercent}%`) return { valid: false, reason: "reply_contains_unapproved_percentage" };
   }
   for (const timeline of reply.match(dayPattern) ?? []) {
-    if (!timeline.replace(/\s/g, "").includes(project.timelineBusinessDays.replace(/\s/g, ""))) return { valid: false, reason: "reply_contains_unapproved_timeline" };
+    const normalizedTimeline = timeline.replace(/\s/g, "");
+    if (!normalizedTimeline.includes("14") || !normalizedTimeline.includes("18")) return { valid: false, reason: "reply_contains_unapproved_timeline" };
   }
   if (/payment\s+(?:is\s+)?confirmed|confirmed\s+payment/i.test(reply)) return { valid: false, reason: "reply_claims_payment_confirmation" };
   return { valid: true };

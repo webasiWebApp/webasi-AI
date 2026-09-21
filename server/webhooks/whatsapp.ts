@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import express, { type Express, type Request, type Response } from "express";
 import { ENV } from "../_core/env";
 import { processWhatsAppMessage } from "../conversations/processor";
+import { pauseConversationByWaId } from "../module-db";
 
 export type WhatsAppMessage = {
   id: string;
@@ -126,10 +127,15 @@ export function registerWhatsAppWebhook(
         return;
       }
 
-      const messages = extractWhatsAppMessages(payload, ownerWaId);
+      const allMessages = extractWhatsAppMessages(payload);
+      const ownerEchoes = ownerWaId ? allMessages.filter((message) => message.from === ownerWaId) : [];
+      const messages = ownerWaId ? allMessages.filter((message) => message.from !== ownerWaId) : allMessages;
       // Acknowledge first. Meta retries unacknowledged deliveries, so processing must not block the response.
       res.status(200).send("EVENT_RECEIVED");
       queueMicrotask(() => {
+        for (const echo of ownerEchoes) {
+          Promise.resolve(pauseConversationByWaId(echo.waId ?? echo.from)).catch((error) => console.error("[WhatsApp] owner echo handling failed", error));
+        }
         for (const message of messages) {
           Promise.resolve(enqueue(message)).catch((error) => console.error("[WhatsApp] enqueue failed", error));
         }

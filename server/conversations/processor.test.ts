@@ -31,7 +31,7 @@ describe("WEBASI message processor", () => {
     const saved: ConversationSnapshot[] = [];
     const sendText = vi.fn().mockResolvedValue({ accepted: true, messageId: "wamid.outbound-1" });
     const runEngine = vi.fn().mockResolvedValue({ reply: "Yes, you can send the logo later.", extractedFields: {}, intent: "question", needsOwner: false, needsOwnerReason: null, reliedOnFacts: ["requiredClientInputs"] });
-    const result = await processWhatsAppMessage(message(), { getConversation: async () => current, saveConversation: async (value) => { saved.push(value); }, getUsageCounts: async () => ({ outboundWhatsApp: 10, geminiRequests: 2 }), incrementUsage: async () => undefined, runEngine, sendText, isOn: true });
+    const result = await processWhatsAppMessage(message(), { claimMessage: async () => true, getConversation: async () => current, saveConversation: async (value) => { saved.push(value); }, getUsageCounts: async () => ({ outboundWhatsApp: 10, geminiRequests: 2 }), incrementUsage: async () => undefined, runEngine, sendText, isOn: true });
 
     expect(result.replied).toBe(true);
     expect(runEngine).toHaveBeenCalledOnce();
@@ -43,7 +43,7 @@ describe("WEBASI message processor", () => {
     const current = snapshot({ state: "awaiting_deposit" });
     const sendText = vi.fn().mockResolvedValue({ accepted: true });
     const saved: ConversationSnapshot[] = [];
-    const result = await processWhatsAppMessage(message({ id: "wamid.slip-1", type: "image", text: undefined, image: { id: "media-1" } }), { getConversation: async () => current, saveConversation: async (value) => { saved.push(value); }, getUsageCounts: async () => ({ outboundWhatsApp: 10, geminiRequests: 2 }), incrementUsage: async () => undefined, sendText, isOn: true });
+    const result = await processWhatsAppMessage(message({ id: "wamid.slip-1", type: "image", text: undefined, image: { id: "media-1" } }), { claimMessage: async () => true, createOrder: async () => true, recordEvent: async () => undefined, notifyOwner: async () => true, getConversation: async () => current, saveConversation: async (value) => { saved.push(value); }, getUsageCounts: async () => ({ outboundWhatsApp: 10, geminiRequests: 2 }), incrementUsage: async () => undefined, sendText, isOn: true });
 
     expect(result.replied).toBe(true);
     expect(saved[0]?.state).toBe("slip_received");
@@ -54,7 +54,7 @@ describe("WEBASI message processor", () => {
   it("does not send when the monthly WhatsApp hard stop is reached", async () => {
     const sendText = vi.fn();
     const runEngine = vi.fn();
-    const result = await processWhatsAppMessage(message({ id: "wamid.cap-1" }), { getConversation: async () => snapshot(), saveConversation: async () => undefined, getUsageCounts: async () => ({ outboundWhatsApp: 810, geminiRequests: 2 }), incrementUsage: async () => undefined, runEngine, sendText, isOn: true });
+    const result = await processWhatsAppMessage(message({ id: "wamid.cap-1" }), { claimMessage: async () => true, getConversation: async () => snapshot(), saveConversation: async () => undefined, getUsageCounts: async () => ({ outboundWhatsApp: 810, geminiRequests: 2 }), incrementUsage: async () => undefined, runEngine, sendText, isOn: true });
 
     expect(result.replied).toBe(false);
     expect(result.reason).toBe("usage_guard_hard_stop");
