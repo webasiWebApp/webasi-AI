@@ -12,5 +12,9 @@ export const ENV = {
   whatsappOwnerWaId: process.env.WHATSAPP_OWNER_WA_ID ?? "",
   whatsappPhoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID ?? "",
   whatsappAccessToken: process.env.WHATSAPP_ACCESS_TOKEN ?? "",
+  whatsappGraphVersion: process.env.WHATSAPP_GRAPH_VERSION ?? "v26.0",
+  whatsappMonthlyCap: Number(process.env.WHATSAPP_MONTHLY_CAP ?? 900),
+  geminiDailyCap: Number(process.env.GEMINI_DAILY_CAP ?? 500),
+  webasiEnabled: process.env.WEBASI_ENABLED !== "false",
   webasiLlmModel: process.env.WEBASI_LLM_MODEL ?? "gemini-3-flash-preview",
 };

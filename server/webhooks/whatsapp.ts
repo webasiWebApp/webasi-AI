@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import express, { type Express, type Request, type Response } from "express";
 import { ENV } from "../_core/env";
-import { claimWhatsAppMessage } from "../db";
+import { processWhatsAppMessage } from "../conversations/processor";
 
 export type WhatsAppMessage = {
   id: string;
@@ -89,15 +89,7 @@ export function registerWhatsAppWebhook(
   const verifyToken = options.verifyToken ?? ENV.whatsappVerifyToken;
   const appSecret = options.appSecret ?? ENV.whatsappAppSecret;
   const ownerWaId = options.ownerWaId ?? ENV.whatsappOwnerWaId;
-  const enqueue = options.enqueue ?? (async (message: ParsedWhatsAppMessage) => {
-    const claimed = await claimWhatsAppMessage({
-      messageId: message.id,
-      waId: message.waId ?? message.from,
-      messageType: message.type,
-    });
-    if (!claimed) return;
-    console.info("[WhatsApp] message queued", { messageId: message.id, type: message.type });
-  });
+  const enqueue = options.enqueue ?? ((message: ParsedWhatsAppMessage) => processWhatsAppMessage(message));
 
   // Raw-body parsing is scoped to this route so HMAC validation uses the exact bytes Meta signed.
   app.get("/api/webhooks/whatsapp", (req: Request, res: Response) => {
