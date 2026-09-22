@@ -9,6 +9,8 @@ import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { registerWhatsAppWebhook } from "../webhooks/whatsapp";
+import { startBaileysTransport } from "../whatsapp/baileys";
+import { ENV } from "./env";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -32,7 +34,8 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
-  registerWhatsAppWebhook(app);
+  if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
+  startBaileysTransport().catch((error) => console.error("[Baileys] startup failed", error));
   app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
   app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
   // Configure body parser with larger size limit for file uploads

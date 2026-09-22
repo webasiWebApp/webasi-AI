@@ -22,3 +22,5 @@ export const insights = mysqlTable("insights", { id: int("id").autoincrement().p
 export type Insight = typeof insights.$inferSelect;
 export const trainingSessions = mysqlTable("training_sessions", { id: int("id").autoincrement().primaryKey(), projectKey: varchar("projectKey", { length: 100 }).notNull().unique(), checklist: text("checklist").notNull(), answers: text("answers").notNull(), summary: text("summary").notNull(), approved: int("approved").default(0).notNull(), updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull() });
 export type TrainingSession = typeof trainingSessions.$inferSelect;
+export const baileysState = mysqlTable("baileys_state", { id: int("id").autoincrement().primaryKey(), stateKey: varchar("stateKey", { length: 255 }).notNull().unique(), payload: text("payload").notNull(), updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull() });
+export type BaileysState = typeof baileysState.$inferSelect;

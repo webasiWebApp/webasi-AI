@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
+import ConnectWhatsApp from "./ConnectWhatsApp";
 import {
   AlertCircle,
   ArrowDownRight,
@@ -104,6 +105,7 @@ function HomePage() {
   const [isOn, setIsOn] = useState(true);
   const [, setLocation] = useLocation();
   const overview = trpc.dashboard.overview.useQuery(undefined, { retry: false });
+  const whatsappStatus = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 8000, retry: false });
   const updateSettings = trpc.settings.update.useMutation({ onSuccess: () => overview.refetch() });
   useEffect(() => { if (overview.data?.settings) setIsOn(overview.data.settings.webasiEnabled); }, [overview.data?.settings?.webasiEnabled]);
   const toggleBot = () => {
@@ -116,7 +118,7 @@ function HomePage() {
     <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
       <div className="mb-7 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div><p className="webasi-label mb-2">Monday, September 21, 2026</p><h1 className="text-[28px] font-bold tracking-[-0.045em] text-[#0F172A] sm:text-[32px]">Good morning, Anuradha<span className="text-[#2563FF]">.</span></h1><p className="mt-1.5 text-sm text-[#64748B]">Here’s what’s happening with your WhatsApp sales assistant.</p></div>
-        <div className="flex items-center gap-2.5 self-start rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 shadow-[0_4px_12px_-8px_rgba(15,23,42,0.25)]"><StatusDot color={isOn ? "#22C55E" : "#94A3B8"} /><span className="text-xs font-semibold text-[#1E293B]">{isOn ? "WEBASI is live" : "WEBASI is off"}</span><span className="ml-1 text-[11px] text-[#94A3B8]">{isOn ? "Since 9:12 AM" : "Replies paused"}</span></div>
+        <div className="flex flex-wrap items-center gap-2.5 self-start rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 shadow-[0_4px_12px_-8px_rgba(15,23,42,0.25)]"><StatusDot color={isOn ? "#22C55E" : "#94A3B8"} /><span className="text-xs font-semibold text-[#1E293B]">{isOn ? "WEBASI is live" : "WEBASI is off"}</span><span className="ml-1 text-[11px] text-[#94A3B8]">{isOn ? "Since 9:12 AM" : "Replies paused"}</span><span className="h-4 w-px bg-[#E2E8F0]" /><StatusDot color={whatsappStatus.data?.status === "connected" ? "#22C55E" : "#F59E0B"} /><span className="text-[11px] font-semibold text-[#64748B]">WhatsApp {whatsappStatus.data?.status === "connected" ? "connected" : whatsappStatus.data?.status === "reconnect_required" ? "reconnect required" : "connecting"}</span></div>
       </div>
 
       <section className="webasi-card relative mb-5 overflow-hidden border-[#C7D8FF] bg-white p-5 sm:p-6 lg:p-7">
@@ -187,6 +189,7 @@ export default function Home() {
   if (page === "/settings") return <SettingsPage />;
   if (page === "/test-chat") return <TestChatPage />;
   if (page === "/events") return <EventsPage />;
+  if (page === "/connect-whatsapp") return <ConnectWhatsApp />;
   return <HomePage />;
 }
 

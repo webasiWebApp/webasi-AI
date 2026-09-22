@@ -36,6 +36,13 @@
       "when": 1790017421158,
       "tag": "0004_lazy_amazoness",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1790103875409,
+      "tag": "0005_daily_calypso",
+      "breakpoints": true
     }
   ]
 }

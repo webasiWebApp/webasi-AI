@@ -17,4 +17,8 @@ export const ENV = {
   geminiDailyCap: Number(process.env.GEMINI_DAILY_CAP ?? 500),
   webasiEnabled: process.env.WEBASI_ENABLED !== "false",
   webasiLlmModel: process.env.WEBASI_LLM_MODEL ?? "gemini-3-flash-preview",
+  whatsappTransport: process.env.WHATSAPP_TRANSPORT ?? "baileys",
+  baileysPhoneNumber: process.env.BAILEYS_PHONE_NUMBER ?? "",
+  baileysSessionEncryptionKey: process.env.BAILEYS_SESSION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "",
+  baileysRateLimitPerMinute: Number(process.env.BAILEYS_RATE_LIMIT_PER_MINUTE ?? 8),
 };

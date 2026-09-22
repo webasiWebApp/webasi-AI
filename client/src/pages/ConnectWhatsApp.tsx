@@ -1,0 +1,33 @@
+import { useState } from "react";
+import { toast } from "sonner";
+import { CheckCircle2, Copy, Link2, Loader2, Phone, RefreshCw, ShieldAlert, Smartphone } from "lucide-react";
+import { trpc } from "@/lib/trpc";
+
+const statusCopy: Record<string, { label: string; tone: string }> = {
+  connected: { label: "Connected", tone: "bg-[#DCFCE7] text-[#15803D]" },
+  pairing: { label: "Pairing code ready", tone: "bg-[#EFF6FF] text-[#1D4ED8]" },
+  connecting: { label: "Connecting", tone: "bg-[#FFF7ED] text-[#C2410C]" },
+  reconnecting: { label: "Reconnecting", tone: "bg-[#FFF7ED] text-[#C2410C]" },
+  reconnect_required: { label: "Reconnect required", tone: "bg-[#FEE2E2] text-[#B91C1C]" },
+  disconnected: { label: "Disconnected", tone: "bg-[#F1F5F9] text-[#64748B]" },
+};
+
+export default function ConnectWhatsApp() {
+  const [phone, setPhone] = useState("");
+  const status = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 5000, retry: false });
+  const pair = trpc.whatsapp.pair.useMutation({ onSuccess: (code) => { status.refetch(); toast.success("Pairing code generated"); setPhone(""); }, onError: (error) => toast.error(error.message) });
+  const reconnect = trpc.whatsapp.reconnect.useMutation({ onSuccess: () => status.refetch(), onError: (error) => toast.error(error.message) });
+  const current = status.data?.status ?? "disconnected";
+  const copy = current === "pairing" && !status.data?.pairingCode ? { label: "Ready to pair", tone: "bg-[#EFF6FF] text-[#1D4ED8]" } : statusCopy[current] ?? statusCopy.disconnected;
+  const submit = () => { const normalized = phone.replace(/\D/g, ""); if (normalized.length < 8) { toast.error("Enter the number with country code, digits only"); return; } pair.mutate({ phoneNumber: normalized }); };
+
+  return <div className="mx-auto max-w-[1040px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
+    <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between"><div><p className="webasi-label mb-2">Workspace / WhatsApp</p><h1 className="text-[26px] font-bold tracking-[-0.035em] text-[#0F172A] sm:text-[30px]">Connect WhatsApp</h1><p className="mt-1.5 max-w-2xl text-sm leading-6 text-[#64748B]">Link the owner’s WhatsApp number as a companion device. The session is encrypted and stored in the project database.</p></div><span className={`inline-flex w-fit items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold ${copy.tone}`}><span className="h-2 w-2 rounded-full bg-current" />{copy.label}</span></div>
+    <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+      <section className="webasi-card p-5 sm:p-7"><div className="flex items-start gap-4"><div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#EFF6FF] text-[#2563FF]"><Link2 className="h-6 w-6" /></div><div><h2 className="text-lg font-bold text-[#0F172A]">Link with a pairing code</h2><p className="mt-1 text-sm leading-6 text-[#64748B]">Enter the WhatsApp number in international format. We’ll show an 8-digit code to enter on the phone.</p></div></div><div className="mt-7 space-y-3"><label className="block text-xs font-bold text-[#1E293B]" htmlFor="whatsapp-phone">Phone number</label><div className="flex gap-2"><div className="relative flex-1"><Phone className="absolute left-3 top-3 h-4 w-4 text-[#94A3B8]" /><input id="whatsapp-phone" value={phone} onChange={(event) => setPhone(event.target.value)} onKeyDown={(event) => event.key === "Enter" && submit()} placeholder="94771234567" className="h-10 w-full rounded-lg border border-[#E2E8F0] pl-9 pr-3 text-sm outline-none focus:border-[#2563FF]" /></div><button onClick={submit} disabled={pair.isPending} className="webasi-button-primary min-h-10 px-4">{pair.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Smartphone className="h-4 w-4" />}Pair number</button></div><p className="text-[11px] text-[#94A3B8]">Digits only, including country code. Do not include +, spaces, or dashes.</p></div>{status.data?.pairingCode && <div className="mt-7 rounded-2xl border border-[#BFDBFE] bg-[#EFF6FF] p-5"><p className="text-xs font-bold uppercase tracking-[0.12em] text-[#1D4ED8]">Your one-time pairing code</p><div className="mt-2 flex items-center justify-between gap-3"><p className="font-mono text-3xl font-bold tracking-[0.22em] text-[#1E40AF]">{status.data.pairingCode}</p><button onClick={() => navigator.clipboard?.writeText(status.data?.pairingCode ?? "")} className="flex h-9 items-center gap-2 rounded-lg bg-white px-3 text-xs font-bold text-[#1D4ED8] shadow-sm"><Copy className="h-3.5 w-3.5" />Copy</button></div><p className="mt-3 text-xs leading-5 text-[#1D4ED8]">On the phone: WhatsApp → Settings → Linked devices → Link a device → Link with phone number instead.</p></div>}
+      {current === "connected" && <div className="mt-7 flex items-start gap-3 rounded-xl bg-[#F0FDF4] p-4 text-sm text-[#166534]"><CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-bold">WhatsApp is connected</p><p className="mt-1 text-xs leading-5">WEBASI can now receive client messages and reply only when the automation switch is ON.</p></div></div>}
+      </section>
+      <section className="webasi-card p-5 sm:p-7"><div className="flex items-start gap-3"><ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-[#D97706]" /><div><h2 className="text-base font-bold text-[#0F172A]">Important risk notice</h2><p className="mt-2 text-sm leading-6 text-[#64748B]">Baileys is an unofficial linked-device connection, not Meta’s official Cloud API. WhatsApp may log out or restrict the number. Keep volume low, reply only to client-initiated chats, and never use it for broadcasts.</p></div></div><div className="mt-6 space-y-3 text-xs leading-5 text-[#64748B]"><p><strong className="text-[#1E293B]">Session persistence:</strong> credentials and Signal keys are encrypted before database storage; nothing is written to Render’s temporary filesystem.</p><p><strong className="text-[#1E293B]">Owner takeover:</strong> a message sent from the linked phone pauses WEBASI in that client chat automatically.</p><p><strong className="text-[#1E293B]">Invalid session:</strong> if WhatsApp logs out the device, automation stops and this page shows Reconnect required.</p></div><button onClick={() => reconnect.mutate()} disabled={reconnect.isPending} className="webasi-button-secondary mt-7 min-h-10 px-4">{reconnect.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}Refresh connection</button></section>
+    </div>
+  </div>;
+}

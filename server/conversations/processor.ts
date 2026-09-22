@@ -7,6 +7,7 @@ import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 import { createOrder, getSettings, recordEvent } from "../module-db";
 import { notifyOwner } from "../_core/notification";
+import { baileysTransport } from "../whatsapp/baileys";
 
 export type MessageProcessorDeps = {
   claimMessage?: typeof claimWhatsAppMessage;
@@ -54,7 +55,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const saveState = deps.saveConversation ?? saveConversation;
   const usage = deps.getUsageCounts ?? getUsageCounts;
   const increment = deps.incrementUsage ?? incrementUsage;
-  const sendText = deps.sendText ?? createWhatsAppSender();
+  const sendText = deps.sendText ?? (ENV.whatsappTransport === "baileys" ? (input) => baileysTransport.sendText(input) : createWhatsAppSender());
   const settings = await getSettings();
   const isOn = deps.isOn ?? settings.webasiEnabled;
 

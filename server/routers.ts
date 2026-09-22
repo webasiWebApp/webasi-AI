@@ -5,6 +5,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getUsageCounts } from "./db";
 import { approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, resumeConversation } from "./module-db";
+import { baileysTransport } from "./whatsapp/baileys";
 
 export const appRouter = router({
   system: systemRouter,
@@ -34,6 +35,11 @@ export const appRouter = router({
   }),
   conversations: router({
     resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
+  }),
+  whatsapp: router({
+    status: protectedProcedure.query(() => baileysTransport.getStatus()),
+    pair: protectedProcedure.input(z.object({ phoneNumber: z.string().min(8) })).mutation(({ input }) => baileysTransport.requestPairingCode(input.phoneNumber)),
+    reconnect: protectedProcedure.mutation(async () => { await baileysTransport.start(); return baileysTransport.getStatus(); }),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
   insights: router({ approve: protectedProcedure.input(z.object({ id: z.number().int() })).mutation(({ input }) => approveInsight(input.id)), }),
