@@ -14,6 +14,7 @@ import {
   ChevronRight,
   CircleHelp,
   Clock3,
+  Eye,
   FileClock,
   Filter,
   FolderKanban,
@@ -107,7 +108,8 @@ function HomePage() {
   const overview = trpc.dashboard.overview.useQuery(undefined, { retry: false });
   const whatsappStatus = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 8000, retry: false });
   const whatsappLabel = whatsappStatus.data?.status === "connected" ? "connected" : whatsappStatus.data?.status === "reconnect_required" ? "reconnect required" : whatsappStatus.data?.status === "disconnected" ? "disconnected" : "connecting";
-  const updateSettings = trpc.settings.update.useMutation({ onSuccess: () => overview.refetch() });
+  const shadowMode = overview.data?.settings.shadowMode ?? false;
+  const updateSettings = trpc.settings.update.useMutation({ onSuccess: (ok) => { if (!ok) { setIsOn(false); toast.error("WEBASI cannot turn on without an active approved project"); } overview.refetch(); }, onError: (error) => { setIsOn(!isOn); toast.error(error.message); } });
   useEffect(() => { if (overview.data?.settings) setIsOn(overview.data.settings.webasiEnabled); }, [overview.data?.settings?.webasiEnabled]);
   const toggleBot = () => {
     const next = !isOn;
@@ -124,8 +126,8 @@ function HomePage() {
 
       <section className="webasi-card relative mb-5 overflow-hidden border-[#C7D8FF] bg-white p-5 sm:p-6 lg:p-7">
         <div className="pointer-events-none absolute right-0 top-0 h-full w-1/2 bg-[radial-gradient(circle_at_80%_20%,rgba(37,99,255,0.10),transparent_58%)]" />
-        <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-start gap-4 sm:gap-5"><div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-[0_8px_18px_-10px_rgba(37,99,255,0.6)]", isOn ? "bg-[#2563FF] text-white" : "bg-[#F1F5F9] text-[#94A3B8]")}><Zap className="h-6 w-6" /></div><div><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Automation control</h2><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", isOn ? "bg-[#DCFCE7] text-[#15803D]" : "bg-[#F1F5F9] text-[#64748B]")}>{isOn ? "ON" : "OFF"}</span></div><p className="mt-1.5 max-w-xl text-sm leading-6 text-[#64748B]">{isOn ? "WEBASI is replying to clients using your active project knowledge. You can take over any chat at any time." : "WEBASI is silent. Incoming messages are logged, but no replies will be sent until you turn it back on."}</p><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-[#64748B]"><span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-[#22C55E]" />Active project ready</span><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-[#2563FF]" />24-hour window only</span></div></div></div>
+          <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-4 sm:gap-5"><div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-[0_8px_18px_-10px_rgba(37,99,255,0.6)]", isOn ? "bg-[#2563FF] text-white" : "bg-[#F1F5F9] text-[#94A3B8]")}><Zap className="h-6 w-6" /></div><div><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Automation control</h2><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", isOn && !shadowMode ? "bg-[#DCFCE7] text-[#15803D]" : shadowMode ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{!isOn ? "OFF" : shadowMode ? "SHADOW" : "ON"}</span></div><p className="mt-1.5 max-w-xl text-sm leading-6 text-[#64748B]">{!isOn ? "WEBASI is silent. Incoming messages are logged, but no replies will be sent until you turn it back on." : shadowMode ? "WEBASI is drafting grounded replies for review. Shadow mode does not send messages to clients." : "WEBASI is replying to clients using your active project knowledge. You can take over any chat at any time."}</p><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-[#64748B]"><span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-[#22C55E]" />Active project ready</span><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-[#2563FF]" />24-hour window only</span>{shadowMode && <span className="inline-flex items-center gap-1.5 text-[#C2410C]"><Eye className="h-3.5 w-3.5" />Drafts only</span>}</div></div></div>
           <button onClick={toggleBot} className={cn("relative h-12 w-[104px] shrink-0 rounded-full p-1 transition-colors focus-visible:ring-2 focus-visible:ring-[#2563FF] active:scale-[0.98]", isOn ? "bg-[#2563FF]" : "bg-[#CBD5E1")} aria-pressed={isOn} aria-label={isOn ? "Turn WEBASI off" : "Turn WEBASI on"}><span className={cn("absolute top-1 flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-[0_3px_7px_rgba(15,23,42,0.18)] transition-transform", isOn ? "translate-x-[52px]" : "translate-x-0")}>{isOn ? <Check className="h-4 w-4 text-[#2563FF]" /> : <Pause className="h-4 w-4 text-[#94A3B8]" />}</span><span className={cn("absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "left-4 opacity-100" : "left-4 opacity-0")}>On</span><span className={cn("absolute inset-y-0 right-4 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "opacity-0" : "opacity-100")}>Off</span></button>
         </div>
       </section>
