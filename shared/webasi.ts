@@ -30,6 +30,10 @@ export function canActivateProject(isReady: boolean): boolean {
   return isReady;
 }
 
+export function formatAutomationAudit({ actor, project, previous, next, detail }: { actor: string; project: string; previous: string; next: string; detail: string }): string {
+  return `Actor: ${actor}. Project: ${project}. Previous: ${previous}. New: ${next}. ${detail}`;
+}
+
 export function shouldSendReply({
   isOn,
   withinCustomerWindow,
