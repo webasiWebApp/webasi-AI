@@ -16,6 +16,7 @@ export function normalizeBaileysPhone(phoneNumber: string) { return phoneNumber.
 export function shouldIgnoreBaileysMessage(remoteJid: string, fromMe: boolean) { return fromMe || !remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast"; }
 export function canSendBaileysMessage(times: number[], now = Date.now(), maxPerMinute = ENV.baileysRateLimitPerMinute, minIntervalMs = 2500) { const recent = times.filter((time) => now - time < 60000); const last = recent.at(-1); return recent.length < maxPerMinute && (!last || now - last >= minIntervalMs); }
 export function startupFailureStatus(error: unknown): Pick<BaileysStatus, "status" | "lastError"> { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "baileys_startup_failed" }; }
+export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
 class BaileysTransport {
   private socket: ReturnType<typeof makeWASocket> | null = null;
@@ -30,6 +31,21 @@ class BaileysTransport {
   private inboundQueue = Promise.resolve();
 
   async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
+
+  async resetSession() {
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.socket = null;
+    const reset = resetBaileysStatus();
+    this.status = reset.status;
+    this.lastError = reset.lastError;
+    this.phoneNumber = undefined;
+    this.pairingCode = undefined;
+    this.reconnectAttempt = 0;
+    await clearBaileysSession();
+    await recordEvent({ eventType: "baileys_session_reset", severity: "warning", title: "WhatsApp session reset", detail: "The stored encrypted linked-device session was cleared by the owner; pairing is required again." });
+    return this.getStatus();
+  }
 
   async start() {
     if (this.socket && ["connected", "connecting", "pairing", "reconnecting"].includes(this.status)) return;

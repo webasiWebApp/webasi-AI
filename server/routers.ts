@@ -40,6 +40,7 @@ export const appRouter = router({
     status: protectedProcedure.query(() => baileysTransport.getStatus()),
     pair: protectedProcedure.input(z.object({ phoneNumber: z.string().min(8) })).mutation(({ input }) => baileysTransport.requestPairingCode(input.phoneNumber)),
     reconnect: protectedProcedure.mutation(async () => { await baileysTransport.start(); return baileysTransport.getStatus(); }),
+    reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
   insights: router({ approve: protectedProcedure.input(z.object({ id: z.number().int() })).mutation(({ input }) => approveInsight(input.id)), }),
