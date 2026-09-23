@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatAutomationAudit } from "../shared/webasi";
+import { formatAutomationAudit, safeEventExportRows } from "../shared/webasi";
 
 describe("automation audit details", () => {
   it("records actor, project, and previous/new state values", () => {
@@ -11,5 +11,11 @@ describe("automation audit details", () => {
     expect(detail).toContain("Previous: NORMAL");
     expect(detail).toContain("New: SHADOW");
     expect(detail).toContain("Replies remain drafts.");
+  });
+
+  it("exports only approved operational event fields", () => {
+    const rows = safeEventExportRows([{ id: 7, eventType: "automation_state_changed", severity: "warning", title: "Automation enabled", detail: "Previous: OFF. New: ON.", clientId: null, createdAt: "2026-09-23T10:00:00.000Z" }]);
+    expect(rows[0]).toEqual({ id: 7, eventType: "automation_state_changed", severity: "warning", title: "Automation enabled", detail: "Previous: OFF. New: ON.", clientId: "", createdAt: "2026-09-23T10:00:00.000Z" });
+    expect(JSON.stringify(rows[0])).not.toContain("secret");
   });
 });

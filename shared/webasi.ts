@@ -34,6 +34,10 @@ export function formatAutomationAudit({ actor, project, previous, next, detail }
   return `Actor: ${actor}. Project: ${project}. Previous: ${previous}. New: ${next}. ${detail}`;
 }
 
+export function safeEventExportRows(events: Array<{ id: number; eventType: string; severity: string; title: string; detail: string; clientId?: string | null; createdAt: Date | string }>) {
+  return events.map((event) => ({ id: event.id, eventType: event.eventType, severity: event.severity, title: event.title, detail: event.detail, clientId: event.clientId ?? "", createdAt: new Date(event.createdAt).toISOString() }));
+}
+
 export function shouldSendReply({
   isOn,
   withinCustomerWindow,
