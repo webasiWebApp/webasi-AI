@@ -4,7 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getUsageCounts } from "./db";
-import { approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, resumeConversation } from "./module-db";
+import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, resumeConversation } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 
 export const appRouter = router({
@@ -43,7 +43,7 @@ export const appRouter = router({
     reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
-  insights: router({ approve: protectedProcedure.input(z.object({ id: z.number().int() })).mutation(({ input }) => approveInsight(input.id)), }),
+  insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.number().int() })).mutation(({ input }) => approveInsight(input.id)), }),
 });
 
 export type AppRouter = typeof appRouter;

@@ -28,6 +28,24 @@ export async function recordEvent(input: { eventType: string; severity?: "info" 
 export async function listEvents() { const db = await getDb(); if (!db) return []; return db.select().from(eventLogs).orderBy(desc(eventLogs.createdAt)).limit(50); }
 export async function listInsights() { const db = await getDb(); if (!db) return []; return db.select().from(insights).orderBy(desc(insights.createdAt)); }
 export async function approveInsight(id: number) { const db = await getDb(); if (!db) return false; await db.update(insights).set({ status: "approved" }).where(eq(insights.id, id)); return true; }
+export async function analyzeInsights() {
+  const db = await getDb(); if (!db) return [];
+  const rows = await db.select().from(conversations).limit(50);
+  const messages = rows.flatMap((row) => { try { return JSON.parse(row.recentMessages) as Array<{ role?: string; text?: string }>; } catch { return []; } });
+  const clientText = messages.filter((message) => message.role !== "assistant").map((message) => message.text ?? "").join(" ").toLowerCase();
+  const questionCount = messages.filter((message) => (message.text ?? "").includes("?")).length;
+  const priceMentions = (clientText.match(/price|cost|budget|expensive|discount|cheap/g) ?? []).length;
+  const singlishMentions = (clientText.match(/mata|one|puluwan|kiyada|hari|eka|ganna/g) ?? []).length;
+  const dropoffStates = rows.filter((row) => ["collecting", "awaiting_deposit", "needs_owner"].includes(row.state));
+  const generated = [
+    priceMentions > 0 ? { title: "Price and budget questions recur in client chats", detail: `${priceMentions} price-related mentions were found across the latest ${rows.length} conversations. Review the package FAQ and objection handling before adding anything to project knowledge.`, category: "Objection", status: "suggested" as const } : null,
+    singlishMentions > 0 ? { title: "Clients frequently use English and Singlish together", detail: `${singlishMentions} Singlish markers were found in recent client messages. Keep mirroring the client’s language style and review the tone guidance.`, category: "Language", status: "suggested" as const } : null,
+    dropoffStates.length > 0 ? { title: "Conversations are dropping off before confirmation", detail: `${dropoffStates.length} conversations remain in collecting, awaiting deposit, or needs owner states. Review the next-step prompts and escalation rules.`, category: "Drop-off", status: "suggested" as const } : null,
+  ].filter((item): item is { title: string; detail: string; category: string; status: "suggested" } => Boolean(item));
+  await db.delete(insights).where(eq(insights.status, "suggested"));
+  if (generated.length > 0) await db.insert(insights).values(generated);
+  return listInsights();
+}
 export async function listConversations() { const db = await getDb(); if (!db) return []; return db.select().from(conversations).orderBy(desc(conversations.updatedAt)).limit(50); }
 export async function pauseConversationByWaId(waId: string) { const db = await getDb(); if (!db) return false; await db.update(conversations).set({ isPaused: 1, state: "paused", updatedAt: new Date() }).where(eq(conversations.waId, waId)); await recordEvent({ eventType: "owner_echo", severity: "info", title: "Owner takeover detected", detail: `Owner reply detected for WhatsApp client ${waId}; automation paused for this chat.` }); return true; }
 export async function resumeConversation(clientId: string) { const db = await getDb(); if (!db) return false; await db.update(conversations).set({ isPaused: 0, state: "collecting", updatedAt: new Date() }).where(eq(conversations.clientId, clientId)); return true; }
