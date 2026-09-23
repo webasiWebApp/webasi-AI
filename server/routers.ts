@@ -6,6 +6,8 @@ import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getUsageCounts } from "./db";
 import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, resumeConversation } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
+import { approvedRestaurantProject } from "./conversations/project";
+import { createConversationEngine } from "./conversations/engine";
 
 export const appRouter = router({
   system: systemRouter,
@@ -35,6 +37,15 @@ export const appRouter = router({
   }),
   conversations: router({
     resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
+  }),
+  testChat: router({
+    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string() })), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
+      const projects = await listProjects();
+      const selected = projects.find((project) => project.projectKey === input.projectKey);
+      let snapshot = approvedRestaurantProject;
+      if (selected) { try { snapshot = JSON.parse(selected.snapshot) as typeof approvedRestaurantProject; } catch { snapshot = approvedRestaurantProject; } }
+      return createConversationEngine({ project: snapshot }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900 });
+    }),
   }),
   whatsapp: router({
     status: protectedProcedure.query(() => baileysTransport.getStatus()),
