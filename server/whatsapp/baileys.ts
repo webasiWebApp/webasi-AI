@@ -15,6 +15,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export function normalizeBaileysPhone(phoneNumber: string) { return phoneNumber.replace(/\D/g, ""); }
 export function shouldIgnoreBaileysMessage(remoteJid: string, fromMe: boolean) { return fromMe || !remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast"; }
 export function canSendBaileysMessage(times: number[], now = Date.now(), maxPerMinute = ENV.baileysRateLimitPerMinute, minIntervalMs = 2500) { const recent = times.filter((time) => now - time < 60000); const last = recent.at(-1); return recent.length < maxPerMinute && (!last || now - last >= minIntervalMs); }
+export function startupFailureStatus(error: unknown): Pick<BaileysStatus, "status" | "lastError"> { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "baileys_startup_failed" }; }
 
 class BaileysTransport {
   private socket: ReturnType<typeof makeWASocket> | null = null;
@@ -33,7 +34,14 @@ class BaileysTransport {
   async start() {
     if (this.socket && ["connected", "connecting", "pairing", "reconnecting"].includes(this.status)) return;
     if (this.starting) return this.starting;
-    this.starting = this.connect().finally(() => { this.starting = null; });
+    this.starting = this.connect().catch(async (error) => {
+      this.socket = null;
+      const failure = startupFailureStatus(error);
+      this.status = failure.status;
+      this.lastError = failure.lastError;
+      await recordEvent({ eventType: "baileys_startup_failed", severity: "error", title: "WhatsApp reconnect required", detail: this.lastError ?? "baileys_startup_failed" });
+      await notifyOwner({ title: "WEBASI: WhatsApp reconnect required", content: "WEBASI could not restore the encrypted WhatsApp session. Reconnect from the dashboard; the stored session was not deleted automatically." }).catch(() => false);
+    }).finally(() => { this.starting = null; });
     return this.starting;
   }
 

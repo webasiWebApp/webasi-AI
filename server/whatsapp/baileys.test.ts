@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canSendBaileysMessage, normalizeBaileysPhone, shouldIgnoreBaileysMessage } from "./baileys";
+import { canSendBaileysMessage, normalizeBaileysPhone, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -17,5 +17,8 @@ describe("Baileys transport safety helpers", () => {
     expect(canSendBaileysMessage([now - 1000], now, 2, 2500)).toBe(false);
     expect(canSendBaileysMessage([now - 3000, now - 4000], now, 2, 2500)).toBe(false);
     expect(canSendBaileysMessage([now - 3000], now, 2, 2500)).toBe(true);
+  });
+  it("surfaces startup authentication failures as reconnect-required without deleting state", () => {
+    expect(startupFailureStatus(new Error("Unsupported state or unable to authenticate data"))).toEqual({ status: "reconnect_required", lastError: "Unsupported state or unable to authenticate data" });
   });
 });

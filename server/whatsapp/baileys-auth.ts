@@ -69,5 +69,5 @@ export async function createDatabaseAuthState(): Promise<AuthenticationState> {
 }
 
 export async function saveBaileysCreds(creds: AuthenticationState["creds"]) { await writeState(`${prefix}creds`, creds); }
-export async function hasBaileysSession() { return Boolean(await readState(`${prefix}creds`)); }
+export async function hasBaileysSession() { try { return Boolean(await readState(`${prefix}creds`)); } catch { return false; } }
 export async function clearBaileysSession() { const state = await getDb(); if (!state) return; await state.delete(baileysState).where(and(like(baileysState.stateKey, `${prefix}%`))); }
