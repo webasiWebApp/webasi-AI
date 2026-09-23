@@ -53,7 +53,7 @@ export type ConversationSnapshot = {
   isPaused: boolean;
   missingFields: string[];
   extractedFields: Record<string, string | null>;
-  recentMessages: Array<{ role: "client" | "assistant"; text: string }>;
+  recentMessages: Array<{ role: "client" | "assistant" | "owner"; text: string }>;
   lastClientMessageAt?: Date;
 };
 

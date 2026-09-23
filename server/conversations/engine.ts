@@ -7,7 +7,7 @@ export type ConversationTurn = {
   clientId: string;
   state: OrderState;
   missingFields: string[];
-  recentMessages: Array<{ role: "client" | "assistant"; text: string }>;
+  recentMessages: Array<{ role: "client" | "assistant" | "owner"; text: string }>;
   incomingText: string;
   isOn: boolean;
   withinCustomerWindow: boolean;

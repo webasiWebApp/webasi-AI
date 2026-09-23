@@ -3,7 +3,7 @@ import pino from "pino";
 import { createDatabaseAuthState, saveBaileysCreds, hasBaileysSession, clearBaileysSession } from "./baileys-auth";
 import { ENV } from "../_core/env";
 import { processWhatsAppMessage } from "../conversations/processor";
-import { pauseConversationByWaId, recordEvent } from "../module-db";
+import { pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 
@@ -107,7 +107,7 @@ class BaileysTransport {
 
   private async handleInbound(message: WAMessage) {
     const remoteJid = message.key.remoteJid ?? "";
-    if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) { if (message.key.fromMe && remoteJid) await pauseConversationByWaId(remoteJid.split("@")[0]); return; }
+    if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) { if (message.key.fromMe && remoteJid) { const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? ""; await pauseConversationByWaId(remoteJid.split("@")[0]); if (ownerText) await recordOwnerMessageByWaId(remoteJid.split("@")[0], ownerText); } return; }
     const waId = remoteJid.split("@")[0];
     const content = message.message;
     if (!content) return;
