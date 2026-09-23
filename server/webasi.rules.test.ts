@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canActivateProject, nextOrderState, shouldSendReply, usagePercent } from "../shared/webasi";
+import { canActivateProject, nextOrderState, shouldSendReply, trainingReadiness, usagePercent } from "../shared/webasi";
 
 describe("WEBASI safety rules", () => {
   it("clamps usage percentages to a safe 0–100 range", () => {
@@ -28,5 +28,11 @@ describe("WEBASI safety rules", () => {
     expect(nextOrderState("collecting", "owner_confirmed")).toBe("collecting");
     expect(nextOrderState("awaiting_deposit", "pause")).toBe("paused");
     expect(nextOrderState("paused", "resume")).toBe("collecting");
+  });
+
+  it("requires every training answer and a summary before approval", () => {
+    expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000" }, "Summary").complete).toBe(false);
+    expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000", timeline: "14–18 days" }, "").complete).toBe(false);
+    expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000", timeline: "14–18 days" }, "Approved package summary")).toMatchObject({ readiness: 100, complete: true });
   });
 });

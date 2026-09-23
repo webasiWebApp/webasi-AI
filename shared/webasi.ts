@@ -21,6 +21,13 @@ export const requiredOrderFields = [
   "existingAssets",
 ] as const;
 
+export function trainingReadiness(checklist: readonly string[], answers: Record<string, string>, summary: string): { completed: number; total: number; readiness: number; complete: boolean } {
+  const completed = checklist.filter((item) => Boolean(answers[item]?.trim())).length;
+  const total = checklist.length;
+  const readiness = total === 0 ? 0 : Math.round((completed / total) * 100);
+  return { completed, total, readiness, complete: completed === total && Boolean(summary.trim()) };
+}
+
 export function usagePercent(value: number, limit: number): number {
   if (limit <= 0) return 100;
   return Math.min(100, Math.max(0, Math.round((value / limit) * 100)));

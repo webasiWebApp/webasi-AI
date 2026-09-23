@@ -4,7 +4,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getUsageCounts } from "./db";
-import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, resumeConversation } from "./module-db";
+import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, resumeConversation } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { approvedRestaurantProject } from "./conversations/project";
 import { createConversationEngine } from "./conversations/engine";
@@ -36,6 +36,7 @@ export const appRouter = router({
     approveTraining: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => approveTraining(input.projectKey)),
   }),
   conversations: router({
+    pause: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => pauseConversation(input.clientId)),
     resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
   }),
   testChat: router({
@@ -43,7 +44,12 @@ export const appRouter = router({
       const projects = await listProjects();
       const selected = projects.find((project) => project.projectKey === input.projectKey);
       let snapshot = approvedRestaurantProject;
-      if (selected) { try { snapshot = JSON.parse(selected.snapshot) as typeof approvedRestaurantProject; } catch { snapshot = approvedRestaurantProject; } }
+      if (selected) {
+        try {
+          const candidate = JSON.parse(selected.snapshot) as Partial<typeof approvedRestaurantProject>;
+          if (typeof candidate.packageName === "string" && typeof candidate.businessName === "string" && typeof candidate.priceLkr === "number" && Array.isArray(candidate.included) && Array.isArray(candidate.excluded) && Array.isArray(candidate.requiredClientInputs)) snapshot = candidate as typeof approvedRestaurantProject;
+        } catch { snapshot = approvedRestaurantProject; }
+      }
       return createConversationEngine({ project: snapshot }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900 });
     }),
   }),
