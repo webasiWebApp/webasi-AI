@@ -3,8 +3,8 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
-import { getUsageCounts } from "./db";
-import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, resumeConversation } from "./module-db";
+import { getUsageCounts, incrementUsage } from "./db";
+import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { approvedRestaurantProject } from "./conversations/project";
 import { createConversationEngine } from "./conversations/engine";
@@ -38,6 +38,20 @@ export const appRouter = router({
   conversations: router({
     pause: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => pauseConversation(input.clientId)),
     resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
+    ownerMessage: protectedProcedure.input(z.object({ clientId: z.string(), text: z.string().trim().min(1).max(2000) })).mutation(async ({ input }) => {
+      const conversation = (await listConversations()).find((row) => row.clientId === input.clientId);
+      if (!conversation) return { accepted: false, reason: "conversation_not_found" };
+      const settings = await getSettings();
+      const counts = await getUsageCounts();
+      if (counts.outboundWhatsApp >= settings.whatsappMonthlyCap * 0.9) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
+      await pauseConversation(input.clientId);
+      const result = await baileysTransport.sendText({ to: conversation.waId, body: input.text });
+      if (!result.accepted) return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" };
+      await incrementUsage("outboundWhatsApp");
+      await recordOwnerMessageByWaId(conversation.waId, input.text);
+      await recordEvent({ eventType: "dashboard_owner_message", severity: "info", title: "Owner message sent", detail: `Owner sent a dashboard message to ${conversation.profileName ?? conversation.waId}.`, clientId: input.clientId });
+      return { accepted: true, messageId: result.messageId };
+    }),
   }),
   testChat: router({
     turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string() })), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
