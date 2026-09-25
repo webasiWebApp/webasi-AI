@@ -5,7 +5,7 @@ import { nextOrderState, requiredOrderFields } from "../../shared/webasi";
 import { createConversationEngine, type StructuredReply } from "./engine";
 import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./sender";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
-import { createOrder, getSettings, recordEvent } from "../module-db";
+import { createOrder, getSettings, recordEvent, getActiveProject } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import { baileysTransport } from "../whatsapp/baileys";
 
@@ -99,7 +99,8 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       return { accepted: true, replied: false, reason: "usage_guard_hard_stop", state: snapshot.state };
     }
     try {
-      const runEngine = deps.runEngine ?? createConversationEngine().runTurn;
+      const activeProject = await getActiveProject();
+      const runEngine = deps.runEngine ?? createConversationEngine({ project: activeProject ?? undefined }).runTurn;
       structured = await runEngine({ clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages, incomingText: textFor(message), isOn, withinCustomerWindow: withinWindow, monthlyOutbound: counts.outboundWhatsApp, monthlyCap: ENV.whatsappMonthlyCap });
       await increment("geminiRequests");
       replyText = structured.reply;

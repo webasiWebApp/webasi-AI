@@ -1,4 +1,3 @@
-import { useAuth } from "@/_core/hooks/useAuth";
 import {
   Sidebar,
   SidebarContent,
@@ -19,7 +18,6 @@ import {
   FileClock,
   FolderKanban,
   LayoutDashboard,
-  LogOut,
   MessageCircle,
   MessagesSquare,
   Smartphone,
@@ -68,13 +66,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 }
 
 function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useAuth();
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const isMobile = useIsMobile();
   const activeMenuItem = menuItems.find((item) => item.path === location) ?? menuItems[0];
-  const displayName = user?.name || "Anuradha Perera";
-  const displayEmail = user?.email || "owner@webasi.io";
+  const displayName = "WEBASI owner";
+  const displayEmail = "Local workspace";
   const initials = displayName.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
 
   return (
@@ -136,7 +133,6 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" side="top" className="w-52 rounded-xl border-[#E2E8F0] p-1.5 shadow-[0_12px_30px_rgba(15,23,42,0.12)]">
               <DropdownMenuItem onClick={() => setLocation("/settings")} className="cursor-pointer rounded-lg text-xs"><Settings className="mr-2 h-3.5 w-3.5" />Workspace settings</DropdownMenuItem>
-              {user && <DropdownMenuItem onClick={logout} className="cursor-pointer rounded-lg text-xs text-[#DC2626] focus:text-[#DC2626]"><LogOut className="mr-2 h-3.5 w-3.5" />Sign out</DropdownMenuItem>}
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarFooter>

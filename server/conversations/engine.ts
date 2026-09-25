@@ -1,5 +1,6 @@
 import { invokeLLM, type Message } from "../_core/llm";
 import { ENV } from "../_core/env";
+import { invokeGemini } from "../_core/gemini";
 import { approvedRestaurantProject, type ApprovedProjectSnapshot } from "./project";
 import { shouldSendReply, type OrderState } from "../../shared/webasi";
 
@@ -57,14 +58,16 @@ const dayPattern = /\b\d{1,3}(?:\s*[–-]\s*\d{1,3})?\s*(?:business\s+)?days?\b/
 function projectFacts(project: ApprovedProjectSnapshot) {
   return [
     `Package: ${project.packageName} — ${project.packageDescription}`,
-    `Included: ${project.included.join(", ")}`,
-    `Not included: ${project.excluded.join(", ")}`,
-    `Price: LKR ${project.priceLkr.toLocaleString("en-LK")}`,
-    `Deposit: ${project.depositPercent}%`,
-    `Timeline: ${project.timelineBusinessDays}`,
-    `Revisions: ${project.revisionPolicy}`,
-    `Required client inputs: ${project.requiredClientInputs.join(", ")}`,
-    `Payment terms: ${project.paymentTerms}`,
+    `Included: ${(project.included || []).join(", ")}`,
+    `Not included: ${(project.excluded || []).join(", ")}`,
+    `Price: LKR ${(project.priceLkr || 0).toLocaleString("en-LK")}`,
+    `Deposit: ${project.depositPercent || 0}%`,
+    `Timeline: ${project.timelineBusinessDays || "Not specified"}`,
+    `Revisions: ${project.revisionPolicy || "Not specified"}`,
+    `Required client inputs: ${(project.requiredClientInputs || []).join(", ")}`,
+    `Payment terms: ${project.paymentTerms || "Not specified"}`,
+    ...(project.samples ? [`Samples: ${project.samples}`] : []),
+    ...(project.contactDetails ? [`Contact details: ${project.contactDetails}`] : []),
   ].join("\n");
 }
 
@@ -73,7 +76,11 @@ function contentToText(content: string | Array<{ type: string; text?: string }>)
 }
 
 function parseStructured(content: string | Array<{ type: string; text?: string }>): StructuredReply {
-  const parsed = JSON.parse(contentToText(content)) as StructuredReply;
+  const raw = contentToText(content).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  const candidate = start >= 0 && end > start ? raw.slice(start, end + 1) : raw;
+  const parsed = JSON.parse(candidate) as StructuredReply;
   if (typeof parsed.reply !== "string" || !Array.isArray(parsed.reliedOnFacts)) throw new Error("Invalid structured conversation response");
   return parsed;
 }
@@ -82,14 +89,17 @@ export function validateGroundedReply(reply: string, project: ApprovedProjectSna
   const prices = reply.match(pricePattern) ?? [];
   for (const price of prices) {
     const numeric = Number(price.replace(/[^0-9]/g, ""));
-    if (numeric !== project.priceLkr) return { valid: false, reason: "reply_contains_unapproved_price" };
+    if (project.priceLkr > 0 && numeric !== project.priceLkr) return { valid: false, reason: "reply_contains_unapproved_price" };
   }
   for (const percent of reply.match(percentPattern) ?? []) {
-    if (percent !== `${project.depositPercent}%`) return { valid: false, reason: "reply_contains_unapproved_percentage" };
+    if (project.depositPercent > 0 && percent !== `${project.depositPercent}%`) return { valid: false, reason: "reply_contains_unapproved_percentage" };
   }
   for (const timeline of reply.match(dayPattern) ?? []) {
-    const normalizedTimeline = timeline.replace(/\s/g, "");
-    if (!normalizedTimeline.includes("14") || !normalizedTimeline.includes("18")) return { valid: false, reason: "reply_contains_unapproved_timeline" };
+    const expectedDays = project.timelineBusinessDays.match(/\d+/g) ?? [];
+    if (expectedDays.length > 0) {
+      const normalizedTimeline = timeline.replace(/\s/g, "");
+      if (!expectedDays.every((day) => normalizedTimeline.includes(day))) return { valid: false, reason: "reply_contains_unapproved_timeline" };
+    }
   }
   if (/payment\s+(?:is\s+)?confirmed|confirmed\s+payment/i.test(reply)) return { valid: false, reason: "reply_claims_payment_confirmation" };
   return { valid: true };
@@ -106,7 +116,7 @@ export function fallbackReply(reason = "I’ll confirm that with the owner and g
   };
 }
 
-export function createConversationEngine({ project = approvedRestaurantProject, callModel = invokeLLM }: { project?: ApprovedProjectSnapshot; callModel?: typeof invokeLLM } = {}): ConversationEngine {
+export function createConversationEngine({ project = approvedRestaurantProject, callModel = ENV.geminiApiKey ? invokeGemini : invokeLLM }: { project?: ApprovedProjectSnapshot; callModel?: typeof invokeLLM } = {}): ConversationEngine {
   return {
     async runTurn(turn) {
       if (!shouldSendReply({ isOn: turn.isOn, withinCustomerWindow: turn.withinCustomerWindow, monthlyOutbound: turn.monthlyOutbound, monthlyCap: turn.monthlyCap })) {
@@ -131,7 +141,13 @@ export function createConversationEngine({ project = approvedRestaurantProject, 
       const response = await callModel({ model: ENV.webasiLlmModel, messages, max_tokens: 900, response_format: responseSchema });
       const content = response.choices[0]?.message?.content;
       if (!content) return fallbackReply("I’m having trouble checking that right now. I’ll ask the owner to follow up.");
-      const structured = parseStructured(content);
+      let structured: StructuredReply;
+      try {
+        structured = parseStructured(content);
+      } catch (error) {
+        console.warn("[Conversation] Invalid structured model response", error instanceof Error ? error.message : error);
+        return fallbackReply("I’m having trouble understanding that right now. Could you rephrase it?");
+      }
       const validation = validateGroundedReply(structured.reply, project);
       if (!validation.valid) return fallbackReply("I’ll confirm the details with the owner and get back to you.");
       return structured;

@@ -14,6 +14,8 @@ export type ApprovedProjectSnapshot = {
   paymentTerms: string;
   tone: string;
   forbiddenTopics: string[];
+  samples: string;
+  contactDetails: string;
 };
 
 export const approvedRestaurantProject: ApprovedProjectSnapshot = {
@@ -32,4 +34,6 @@ export const approvedRestaurantProject: ApprovedProjectSnapshot = {
   paymentTerms: "A 40% deposit starts the project. The balance is due before launch.",
   tone: "warm, concise, helpful, and natural in English or Singlish",
   forbiddenTopics: ["discounts", "custom features not listed", "legal promises", "technical guarantees", "payment confirmation"],
+  samples: "Portfolio samples available upon request.",
+  contactDetails: "Contact the owner via WhatsApp.",
 };

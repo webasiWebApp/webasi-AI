@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
+import { baileysStatusCode, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -23,5 +23,9 @@ describe("Baileys transport safety helpers", () => {
   });
   it("returns to a clean disconnected state before pairing again", () => {
     expect(resetBaileysStatus()).toEqual({ status: "disconnected", lastError: undefined });
+  });
+  it("extracts status codes from Baileys error shapes", () => {
+    expect(baileysStatusCode({ output: { statusCode: 401 } })).toBe(401);
+    expect(baileysStatusCode({ statusCode: 403 })).toBe(403);
   });
 });

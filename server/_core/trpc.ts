@@ -25,7 +25,9 @@ const requireUser = t.middleware(async opts => {
   });
 });
 
-export const protectedProcedure = t.procedure.use(requireUser);
+// Authentication is disabled for this single-tenant dashboard deployment.
+// Keep the name so existing routers and future auth work do not require a broad rewrite.
+export const protectedProcedure = publicProcedure;
 
 export const adminProcedure = t.procedure.use(
   t.middleware(async opts => {

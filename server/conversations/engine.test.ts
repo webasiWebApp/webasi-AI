@@ -73,11 +73,25 @@ describe("WEBASI grounded conversation engine", () => {
     expect(validateGroundedReply("The package is LKR 85,000 and includes two rounds of revisions.", approvedRestaurantProject).valid).toBe(true);
   });
 
+  it("validates custom project timelines instead of the restaurant default", () => {
+    const customProject = { ...approvedRestaurantProject, priceLkr: 2000, depositPercent: 0, timelineBusinessDays: "Not specified" };
+    expect(validateGroundedReply("The Canva website can be ready in 3 business days.", customProject).valid).toBe(true);
+    expect(validateGroundedReply("The package is LKR 85,000.", customProject).valid).toBe(false);
+  });
+
   it("falls back if the model returns a price that is not in the project snapshot", async () => {
     const callModel = vi.fn().mockResolvedValue(modelReply("I can offer it for LKR 60,000."));
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Can you make it cheaper?" });
 
     expect(result.needsOwner).toBe(true);
     expect(result.reply).toContain("confirm");
+  });
+
+  it("does not throw when the model returns malformed JSON", async () => {
+    const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: '{"reply":"This response is unfinished' } }] });
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });
+
+    expect(result.reply).toContain("rephrase");
+    expect(result.needsOwner).toBe(true);
   });
 });

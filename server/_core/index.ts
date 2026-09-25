@@ -3,7 +3,6 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
@@ -11,6 +10,7 @@ import { serveStatic, setupVite } from "./vite";
 import { registerWhatsAppWebhook } from "../webhooks/whatsapp";
 import { startBaileysTransport } from "../whatsapp/baileys";
 import { ENV } from "./env";
+import { checkSupabaseConnection } from "./supabase";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -37,12 +37,20 @@ async function startServer() {
   if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
   startBaileysTransport().catch((error) => console.error("[Baileys] startup failed", error));
   app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
+  app.get("/health", async (_req, res) => {
+    const supabase = await checkSupabaseConnection();
+    const whatsapp = await (async () => {
+      try { return await import("../whatsapp/baileys").then(({ baileysTransport }) => baileysTransport.getStatus()); }
+      catch (error) { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "whatsapp_unavailable" }; }
+    })();
+    const ok = supabase.ok && whatsapp.status !== "reconnect_required";
+    res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase, whatsapp, time: new Date().toISOString() });
+  });
   app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
   // Configure body parser with larger size limit for file uploads
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
-  registerOAuthRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",

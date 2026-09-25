@@ -1,13 +1,15 @@
 import { z } from "zod";
+import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { getUsageCounts, incrementUsage } from "./db";
-import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent } from "./module-db";
+import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { approvedRestaurantProject } from "./conversations/project";
 import { createConversationEngine } from "./conversations/engine";
+import { parseProjectSnapshot } from "../shared/webasi";
 
 export const appRouter = router({
   system: systemRouter,
@@ -57,19 +59,19 @@ export const appRouter = router({
     turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string() })), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
       const projects = await listProjects();
       const selected = projects.find((project) => project.projectKey === input.projectKey);
-      let snapshot = approvedRestaurantProject;
-      if (selected) {
-        try {
-          const candidate = JSON.parse(selected.snapshot) as Partial<typeof approvedRestaurantProject>;
-          if (typeof candidate.packageName === "string" && typeof candidate.businessName === "string" && typeof candidate.priceLkr === "number" && Array.isArray(candidate.included) && Array.isArray(candidate.excluded) && Array.isArray(candidate.requiredClientInputs)) snapshot = candidate as typeof approvedRestaurantProject;
-        } catch { snapshot = approvedRestaurantProject; }
-      }
+      if (!selected) throw new TRPCError({ code: "NOT_FOUND", message: "The selected project no longer exists." });
+      const parsedSnapshot = parseProjectSnapshot(selected.snapshot);
+      const training = parsedSnapshot ? null : await getTraining(selected.projectKey);
+      const projectIsApproved = selected.status === "approved" || selected.status === "active" || selected.readiness >= 100;
+      if (!parsedSnapshot && (!training || (!training.approved && !projectIsApproved))) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Complete and approve this project's training before using Test Chat." });
+      const snapshot = await compileProjectSnapshot(selected.projectKey);
+      if (!snapshot) throw new TRPCError({ code: "NOT_FOUND", message: "Failed to compile project snapshot." });
       return createConversationEngine({ project: snapshot }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900 });
     }),
   }),
   whatsapp: router({
     status: protectedProcedure.query(() => baileysTransport.getStatus()),
-    pair: protectedProcedure.input(z.object({ phoneNumber: z.string().min(8) })).mutation(({ input }) => baileysTransport.requestPairingCode(input.phoneNumber)),
+    pair: protectedProcedure.mutation(() => baileysTransport.startPairing()),
     reconnect: protectedProcedure.mutation(async () => { await baileysTransport.start(); return baileysTransport.getStatus(); }),
     reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
   }),

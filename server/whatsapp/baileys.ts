@@ -8,7 +8,7 @@ import { notifyOwner } from "../_core/notification";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 
 export type BaileysConnectionStatus = "disconnected" | "pairing" | "connecting" | "connected" | "reconnecting" | "reconnect_required";
-export type BaileysStatus = { status: BaileysConnectionStatus; phoneNumber?: string; pairingCode?: string; lastError?: string; updatedAt: string; hasSession: boolean };
+export type BaileysStatus = { status: BaileysConnectionStatus; phoneNumber?: string; pairingCode?: string; qr?: string; lastError?: string; updatedAt: string; hasSession: boolean };
 export type BaileysSendResult = { accepted: boolean; messageId?: string; reason?: string };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -16,6 +16,10 @@ export function normalizeBaileysPhone(phoneNumber: string) { return phoneNumber.
 export function shouldIgnoreBaileysMessage(remoteJid: string, fromMe: boolean) { return fromMe || !remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast"; }
 export function canSendBaileysMessage(times: number[], now = Date.now(), maxPerMinute = ENV.baileysRateLimitPerMinute, minIntervalMs = 2500) { const recent = times.filter((time) => now - time < 60000); const last = recent.at(-1); return recent.length < maxPerMinute && (!last || now - last >= minIntervalMs); }
 export function startupFailureStatus(error: unknown): Pick<BaileysStatus, "status" | "lastError"> { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "baileys_startup_failed" }; }
+export function baileysStatusCode(error: unknown): number {
+  const value = error as { output?: { statusCode?: unknown }; statusCode?: unknown; data?: { statusCode?: unknown } };
+  return Number(value?.output?.statusCode ?? value?.statusCode ?? value?.data?.statusCode ?? 0);
+}
 export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
 class BaileysTransport {
@@ -23,6 +27,7 @@ class BaileysTransport {
   private starting: Promise<void> | null = null;
   private status: BaileysConnectionStatus = "disconnected";
   private pairingCode: string | undefined;
+  private qr: string | undefined;
   private phoneNumber: string | undefined;
   private lastError: string | undefined;
   private reconnectAttempt = 0;
@@ -30,7 +35,7 @@ class BaileysTransport {
   private readonly recentSends = new Map<string, number[]>();
   private inboundQueue = Promise.resolve();
 
-  async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
+  async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, qr: this.qr, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
 
   async resetSession() {
     clearTimeout(this.reconnectTimer);
@@ -41,6 +46,7 @@ class BaileysTransport {
     this.lastError = reset.lastError;
     this.phoneNumber = undefined;
     this.pairingCode = undefined;
+    this.qr = undefined;
     this.reconnectAttempt = 0;
     await clearBaileysSession();
     await recordEvent({ eventType: "baileys_session_reset", severity: "warning", title: "WhatsApp session reset", detail: "The stored encrypted linked-device session was cleared by the owner; pairing is required again." });
@@ -54,7 +60,10 @@ class BaileysTransport {
       this.socket = null;
       const failure = startupFailureStatus(error);
       this.status = failure.status;
-      this.lastError = failure.lastError;
+      const statusCode = baileysStatusCode(error);
+      this.lastError = statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.forbidden
+        ? `session_invalidated_${statusCode}`
+        : failure.lastError;
       await recordEvent({ eventType: "baileys_startup_failed", severity: "error", title: "WhatsApp reconnect required", detail: this.lastError ?? "baileys_startup_failed" });
       await notifyOwner({ title: "WEBASI: WhatsApp reconnect required", content: "WEBASI could not restore the encrypted WhatsApp session. Reconnect from the dashboard; the stored session was not deleted automatically." }).catch(() => false);
     }).finally(() => { this.starting = null; });
@@ -68,26 +77,26 @@ class BaileysTransport {
     this.socket.ev.on("creds.update", (creds) => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
     this.socket.ev.on("connection.update", (update) => this.handleConnection(update, auth).catch((error) => console.error("[Baileys] connection update failed", error)));
     this.socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
+    if (!auth.creds.registered) {
+      this.status = "pairing";
+    }
   }
 
   private async handleConnection(update: { connection?: string; qr?: string; lastDisconnect?: { error?: unknown } }, auth: Awaited<ReturnType<typeof createDatabaseAuthState>>) {
     if (update.qr && !auth.creds.registered) {
       this.status = "pairing";
-      if (this.phoneNumber && !this.pairingCode && this.socket) {
-        try { this.pairingCode = await this.socket.requestPairingCode(this.phoneNumber); await recordEvent({ eventType: "baileys_pairing_code", title: "WhatsApp pairing code generated", detail: "A one-time pairing code is ready in Connect WhatsApp." }); }
-        catch (error) { this.lastError = error instanceof Error ? error.message : "pairing_failed"; await recordEvent({ eventType: "baileys_pairing_failed", severity: "error", title: "WhatsApp pairing failed", detail: this.lastError }); }
-      }
+      this.qr = update.qr;
+      await recordEvent({ eventType: "baileys_qr_ready", title: "WhatsApp QR code ready", detail: "Scan the QR code to connect." });
     }
     if (update.connection === "open") {
-      this.status = "connected"; this.pairingCode = undefined; this.reconnectAttempt = 0; this.lastError = undefined;
+      this.status = "connected"; this.pairingCode = undefined; this.qr = undefined; this.reconnectAttempt = 0; this.lastError = undefined;
       await recordEvent({ eventType: "baileys_connected", title: "WhatsApp connected", detail: "The linked-device transport is connected." });
     }
     if (update.connection === "close") {
-      const statusCode = Number((update.lastDisconnect?.error as { output?: { statusCode?: number } })?.output?.statusCode ?? 0);
+      const statusCode = baileysStatusCode(update.lastDisconnect?.error);
       this.socket = null;
       if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession || statusCode === DisconnectReason.forbidden) {
         this.status = "reconnect_required"; this.lastError = `session_invalidated_${statusCode}`; this.pairingCode = undefined;
-        await clearBaileysSession();
         await recordEvent({ eventType: "baileys_logged_out", severity: "error", title: "WhatsApp reconnect required", detail: "The linked-device session was invalidated. Reconnect WhatsApp from the dashboard." });
         await notifyOwner({ title: "WEBASI: WhatsApp reconnect required", content: "The Baileys linked-device session was logged out or invalidated. Open Connect WhatsApp and pair the number again." }).catch(() => false);
       } else {
@@ -119,19 +128,12 @@ class BaileysTransport {
     await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText(input) });
   }
 
-  async requestPairingCode(phoneNumber: string) {
-    const normalized = normalizeBaileysPhone(phoneNumber);
-    if (!normalized || normalized.length < 8) throw new Error("Enter the phone number with country code and digits only");
-    this.phoneNumber = normalized;
+  async startPairing() {
     await this.start();
-    if (this.socket && this.status === "pairing" && !this.pairingCode) {
-      try { this.pairingCode = await this.socket.requestPairingCode(normalized); }
-      catch (error) { this.lastError = error instanceof Error ? error.message : "pairing_failed"; }
-    }
     const deadline = Date.now() + 15000;
-    while (!this.pairingCode && Date.now() < deadline && this.status !== "reconnect_required") await sleep(250);
-    if (!this.pairingCode) throw new Error(this.lastError ?? "Pairing code is not ready yet; try again in a moment");
-    return this.pairingCode;
+    while (!this.qr && Date.now() < deadline && this.status !== "reconnect_required") await sleep(250);
+    if (!this.qr) throw new Error(this.lastError ?? "QR code is not ready yet; try again in a moment");
+    return this.qr;
   }
 
   async sendText(input: { to: string; body: string }): Promise<BaileysSendResult> {

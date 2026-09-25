@@ -1,15 +1,15 @@
 import crypto from "node:crypto";
-import { and, eq, like } from "drizzle-orm";
 import { BufferJSON, initAuthCreds, type AuthenticationState, type SignalDataTypeMap, type SignalKeyStore } from "baileys";
-import { baileysState } from "../../drizzle/schema";
-import { getDb } from "../db";
+import { getSupabaseServer } from "../_core/supabase";
 import { ENV } from "../_core/env";
 
 const prefix = "baileys:";
 const keyPrefix = "baileys:key:";
 
 function encryptionKey() {
-  if (!ENV.baileysSessionEncryptionKey) throw new Error("BAILEYS_SESSION_ENCRYPTION_KEY or JWT_SECRET is required for Baileys session storage");
+  if (!ENV.baileysSessionEncryptionKey || ENV.baileysSessionEncryptionKey.length < 32) {
+    throw new Error("BAILEYS_SESSION_ENCRYPTION_KEY or JWT_SECRET with at least 32 characters is required");
+  }
   return crypto.createHash("sha256").update(ENV.baileysSessionEncryptionKey).digest();
 }
 function seal(value: unknown) {
@@ -28,18 +28,17 @@ function open<T>(payload: string): T {
 }
 
 async function readState<T>(stateKey: string): Promise<T | undefined> {
-  const db = await getDb(); if (!db) return undefined;
-  const rows = await db.select().from(baileysState).where(eq(baileysState.stateKey, stateKey)).limit(1);
-  return rows[0] ? open<T>(rows[0].payload) : undefined;
+  const { data, error } = await getSupabaseServer().from("baileys_auth_state").select("payload").eq("state_key", stateKey).maybeSingle();
+  if (error) throw new Error(`Supabase Baileys read failed: ${error.message}`);
+  return data ? open<T>(data.payload) : undefined;
 }
 async function writeState(stateKey: string, value: unknown) {
-  const db = await getDb(); if (!db) return;
-  const payload = seal(value);
-  await db.insert(baileysState).values({ stateKey, payload }).onDuplicateKeyUpdate({ set: { payload, updatedAt: new Date() } });
+  const { error } = await getSupabaseServer().from("baileys_auth_state").upsert({ state_key: stateKey, payload: seal(value), updated_at: new Date().toISOString() });
+  if (error) throw new Error(`Supabase Baileys write failed: ${error.message}`);
 }
 async function deleteState(stateKey: string) {
-  const db = await getDb(); if (!db) return;
-  await db.delete(baileysState).where(eq(baileysState.stateKey, stateKey));
+  const { error } = await getSupabaseServer().from("baileys_auth_state").delete().eq("state_key", stateKey);
+  if (error) throw new Error(`Supabase Baileys delete failed: ${error.message}`);
 }
 
 export async function createDatabaseAuthState(): Promise<AuthenticationState> {
@@ -60,8 +59,8 @@ export async function createDatabaseAuthState(): Promise<AuthenticationState> {
       })));
     },
     async clear() {
-      const db = await getDb(); if (!db) return;
-      await db.delete(baileysState).where(like(baileysState.stateKey, `${keyPrefix}%`));
+      const { error } = await getSupabaseServer().from("baileys_auth_state").delete().like("state_key", `${keyPrefix}%`);
+      if (error) throw new Error(`Supabase Baileys clear failed: ${error.message}`);
       await deleteState(`${prefix}creds`);
     },
   };
@@ -70,4 +69,7 @@ export async function createDatabaseAuthState(): Promise<AuthenticationState> {
 
 export async function saveBaileysCreds(creds: AuthenticationState["creds"]) { await writeState(`${prefix}creds`, creds); }
 export async function hasBaileysSession() { try { return Boolean(await readState(`${prefix}creds`)); } catch { return false; } }
-export async function clearBaileysSession() { const state = await getDb(); if (!state) return; await state.delete(baileysState).where(and(like(baileysState.stateKey, `${prefix}%`))); }
+export async function clearBaileysSession() {
+  const { error } = await getSupabaseServer().from("baileys_auth_state").delete().like("state_key", `${prefix}%`);
+  if (error) throw new Error(`Supabase Baileys clear failed: ${error.message}`);
+}

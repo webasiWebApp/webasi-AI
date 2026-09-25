@@ -21,6 +21,46 @@ export const requiredOrderFields = [
   "existingAssets",
 ] as const;
 
+export type ProjectSnapshot = {
+  id?: string;
+  version?: number;
+  businessName: string;
+  packageName: string;
+  packageDescription?: string;
+  included: string[];
+  excluded: string[];
+  priceLkr: number;
+  depositPercent: number;
+  timelineBusinessDays: string;
+  revisionPolicy?: string;
+  requiredClientInputs: string[];
+  paymentTerms?: string;
+  tone?: string;
+  forbiddenTopics?: string[];
+  samples?: string;
+  contactDetails?: string;
+};
+
+export function parseProjectSnapshot(raw: string | null | undefined): ProjectSnapshot | null {
+  if (!raw) return null;
+  try {
+    const candidate = JSON.parse(raw) as Partial<ProjectSnapshot>;
+    if (
+      typeof candidate.packageName !== "string" ||
+      typeof candidate.businessName !== "string" ||
+      typeof candidate.priceLkr !== "number" ||
+      typeof candidate.depositPercent !== "number" ||
+      typeof candidate.timelineBusinessDays !== "string" ||
+      !Array.isArray(candidate.included) ||
+      !Array.isArray(candidate.excluded) ||
+      !Array.isArray(candidate.requiredClientInputs)
+    ) return null;
+    return candidate as ProjectSnapshot;
+  } catch {
+    return null;
+  }
+}
+
 export function trainingReadiness(checklist: readonly string[], answers: Record<string, string>, summary: string): { completed: number; total: number; readiness: number; complete: boolean } {
   const completed = checklist.filter((item) => Boolean(answers[item]?.trim())).length;
   const total = checklist.length;

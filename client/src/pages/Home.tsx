@@ -3,29 +3,21 @@ import { useLocation } from "wouter";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import ConnectWhatsApp from "./ConnectWhatsApp";
-import { safeEventExportRows } from "@shared/webasi";
+import { parseProjectSnapshot, safeEventExportRows } from "@shared/webasi";
 import {
   AlertCircle,
-  ArrowDownRight,
   ArrowUpRight,
   Bell,
   Bot,
   Check,
   CheckCircle2,
   ChevronRight,
-  CircleHelp,
   Clock3,
   Download,
   Eye,
   FileClock,
-  Filter,
   FolderKanban,
-  Image as ImageIcon,
   Info,
-  Laptop,
-  LifeBuoy,
-  Loader2,
-  Mail,
   MessageCircle,
   MessageSquareText,
   MoreHorizontal,
@@ -39,39 +31,9 @@ import {
   ShieldCheck,
   Sparkles,
   TrendingUp,
-  UserRound,
   WalletCards,
-  X,
   Zap,
 } from "lucide-react";
-
-const activeProject = {
-  name: "Restaurant Website Package",
-  status: "Approved & active",
-  price: "LKR 85,000",
-  deposit: "40% deposit",
-  timeline: "14–18 business days",
-  updated: "Updated 2 days ago",
-};
-
-const attentionItems = [
-  { icon: WalletCards, tone: "blue", title: "Deposit slip to verify", detail: "Nimal Perera · 12 min ago", action: "Review order", path: "/orders" },
-  { icon: MessageSquareText, tone: "amber", title: "2 conversations need you", detail: "Questions outside project scope", action: "Open inbox", path: "/conversations" },
-  { icon: CircleHelp, tone: "violet", title: "3 new insight suggestions", detail: "From the last 30 conversations", action: "Review insights", path: "/insights" },
-];
-
-const recentConversations = [
-  { name: "Nimal Perera", initials: "NP", tone: "blue", message: "Can I send the logo later?", time: "12 min ago", state: "Awaiting deposit", unread: true },
-  { name: "Sakura Cafe", initials: "SC", tone: "purple", message: "mata menu eka add karanna puluwanda?", time: "1 hr ago", state: "Collecting brief", unread: true },
-  { name: "Dilan Fernando", initials: "DF", tone: "green", message: "Thanks, I will check and get back to you.", time: "Yesterday", state: "Needs owner", unread: false },
-  { name: "Kavindi Jayasuriya", initials: "KJ", tone: "orange", message: "Do you also handle domain registration?", time: "Yesterday", state: "Collecting brief", unread: false },
-];
-
-const orders = [
-  { id: "WA-1048", client: "Nimal Perera", package: "Restaurant Website Package", amount: "LKR 34,000", state: "Slip received", date: "Today, 10:42 AM" },
-  { id: "WA-1045", client: "Kavindi Jayasuriya", package: "Restaurant Website Package", amount: "LKR 34,000", state: "Awaiting deposit", date: "Sep 20, 4:18 PM" },
-  { id: "WA-1042", client: "Dilan Fernando", package: "Restaurant Website Package", amount: "LKR 34,000", state: "Confirmed", date: "Sep 18, 11:02 AM" },
-];
 
 function cn(...classes: Array<string | false | null | undefined>) { return classes.filter(Boolean).join(" "); }
 
@@ -109,21 +71,401 @@ function HomePage() {
   const [, setLocation] = useLocation();
   const overview = trpc.dashboard.overview.useQuery(undefined, { retry: false });
   const whatsappStatus = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 8000, retry: false });
-  const whatsappLabel = whatsappStatus.data?.status === "connected" ? "connected" : whatsappStatus.data?.status === "reconnect_required" ? "reconnect required" : whatsappStatus.data?.status === "disconnected" ? "disconnected" : "connecting";
-  const shadowMode = overview.data?.settings.shadowMode ?? false;
-  const updateSettings = trpc.settings.update.useMutation({ onSuccess: (ok) => { if (!ok) { setIsOn(false); toast.error("WEBASI cannot turn on without an active approved project"); } overview.refetch(); }, onError: (error) => { setIsOn(!isOn); toast.error(error.message); } });
-  useEffect(() => { if (overview.data?.settings) setIsOn(overview.data.settings.webasiEnabled); }, [overview.data?.settings?.webasiEnabled]);
+  const settings = overview.data?.settings;
+  const activeProject = overview.data?.activeProject ?? null;
+  const snapshot = activeProject ? parseProjectSnapshot(activeProject.snapshot) : null;
+
+  const recentConversations = (overview.data?.conversations ?? []).slice(0, 4).map((row) => {
+    const name = row.profileName ?? row.waId;
+    const initials = name.split(/\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase();
+    let message = "No message history yet";
+
+    try {
+      const parsed = JSON.parse(row.recentMessages ?? "[]") as Array<{ text?: string }>;
+      const latest = [...parsed].reverse().find((item) => (item.text ?? "").trim());
+      if (latest?.text) message = latest.text;
+    } catch {
+      message = "No message history yet";
+    }
+
+    return {
+      name,
+      initials,
+      message,
+      time: row.updatedAt ? new Date(row.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Now",
+      state: row.state.replaceAll("_", " "),
+      tone: row.isPaused ? "amber" : row.state === "needs_owner" ? "purple" : row.state === "confirmed_by_owner" ? "green" : "blue",
+      unread: row.state === "needs_owner" || row.isPaused,
+    };
+  });
+
+  const attentionItems = [
+    ...((overview.data?.conversations ?? []).filter((row) => row.state === "needs_owner").slice(0, 2).map((row) => ({
+      title: `${row.profileName ?? row.waId} needs owner review`,
+      detail: "Manual follow-up required before continuing automation.",
+      action: "Review",
+      icon: AlertCircle,
+      tone: "amber",
+      path: "/conversations",
+    }))),
+    ...((overview.data?.orders ?? []).filter((order) => order.state === "awaiting_deposit").slice(0, 2).map((order) => ({
+      title: `Deposit pending for ${order.packageName}`,
+      detail: `${order.orderKey} is waiting for confirmation.`,
+      action: "Verify",
+      icon: WalletCards,
+      tone: "blue",
+      path: "/orders",
+    }))),
+  ];
+
+  const whatsappLabel = whatsappStatus.data?.status === "connected"
+    ? "connected"
+    : whatsappStatus.data?.status === "reconnect_required"
+      ? "reconnect required"
+      : whatsappStatus.data?.status === "disconnected"
+        ? "disconnected"
+        : "connecting";
+
+  const shadowMode = settings?.shadowMode ?? false;
+  const usage = overview.data?.usage ?? { outboundWhatsApp: 0, geminiRequests: 0 };
+  const businessName = settings?.businessName?.trim() || "Your business";
+  const greeting = (() => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good morning";
+    if (hour < 18) return "Good afternoon";
+    return "Good evening";
+  })();
+  const todayLabel = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date());
+
+  const updateSettings = trpc.settings.update.useMutation({
+    onSuccess: (ok) => {
+      if (!ok) {
+        setIsOn(false);
+        toast.error("WEBASI cannot turn on without an active approved project");
+      }
+      overview.refetch();
+    },
+    onError: (error) => {
+      setIsOn((current) => !current);
+      toast.error(error.message);
+    },
+  });
+
+  useEffect(() => {
+    if (settings) setIsOn(settings.webasiEnabled);
+  }, [settings?.webasiEnabled]);
+
   const toggleBot = () => {
     const next = !isOn;
-    if (next && !window.confirm(`Enable WEBASI live replies for ${overview.data?.activeProject?.name ?? "the active project"}? Incoming client messages may receive automated responses while WhatsApp is connected. You can turn it off at any time.`)) return;
+    if (next && !window.confirm(`Enable WEBASI live replies for ${activeProject?.name ?? "the active project"}? Incoming client messages may receive automated responses while WhatsApp is connected. You can turn it off at any time.`)) {
+      return;
+    }
+
+    setIsOn(next);
+    updateSettings.mutate({ webasiEnabled: next });
+    toast(next ? "WEBASI is now live" : "WEBASI is off — no messages will be sent", {
+      description: next ? "Replies are enabled for the active project." : "Incoming messages will still be logged.",
+    });
+  };
+
+  const activeProjectName = activeProject?.name ?? "No active project";
+  const activeProjectStatus = activeProject?.status ? activeProject.status.replaceAll("_", " ") : "Not configured";
+  const projectPrice = snapshot?.priceLkr ? `LKR ${snapshot.priceLkr.toLocaleString()}` : activeProject ? "Custom package" : "—";
+  const projectDeposit = snapshot?.depositPercent ? `${snapshot.depositPercent}%` : activeProject ? "Varies" : "—";
+  const projectTimeline = snapshot?.timelineBusinessDays || "—";
+  const projectUpdated = activeProject?.updatedAt ? new Date(activeProject.updatedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "No active project yet";
+  const attentionTitle = attentionItems.length ? `${attentionItems.length} item${attentionItems.length === 1 ? "" : "s"} to review` : "No items to review";
+
+  return (
+    <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
+      <div className="mb-7 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="webasi-label mb-2">{todayLabel}</p>
+          <h1 className="text-[28px] font-bold tracking-[-0.045em] text-[#0F172A] sm:text-[32px]">{greeting}, {businessName}<span className="text-[#2563FF]">.</span></h1>
+          <p className="mt-1.5 text-sm text-[#64748B]">Here’s what’s happening with your WhatsApp sales assistant.</p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2.5 self-start rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 shadow-[0_4px_12px_-8px_rgba(15,23,42,0.25)]">
+          <StatusDot color={isOn ? "#22C55E" : "#94A3B8"} />
+          <span className="text-xs font-semibold text-[#1E293B]">{isOn ? "WEBASI is live" : "WEBASI is off"}</span>
+          <span className="ml-1 text-[11px] text-[#94A3B8]">{isOn ? "Live" : "Replies paused"}</span>
+          <span className="h-4 w-px bg-[#E2E8F0]" />
+          <StatusDot color={whatsappLabel === "connected" ? "#22C55E" : whatsappLabel === "reconnect required" ? "#DC2626" : "#F59E0B"} />
+          <span className={cn("text-[11px] font-semibold", whatsappLabel === "reconnect required" ? "text-[#B91C1C]" : "text-[#64748B]")}>WhatsApp {whatsappLabel}</span>
+        </div>
+      </div>
+
+      <section className="webasi-card relative mb-5 overflow-hidden border-[#C7D8FF] bg-white p-5 sm:p-6 lg:p-7">
+        <div className="pointer-events-none absolute right-0 top-0 h-full w-1/2 bg-[radial-gradient(circle_at_80%_20%,rgba(37,99,255,0.10),transparent_58%)]" />
+        <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-start gap-4 sm:gap-5">
+            <div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-[0_8px_18px_-10px_rgba(37,99,255,0.6)]", isOn ? "bg-[#2563FF] text-white" : "bg-[#F1F5F9] text-[#94A3B8]")}>
+              <Zap className="h-6 w-6" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Automation control</h2>
+                <span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", isOn && !shadowMode ? "bg-[#DCFCE7] text-[#15803D]" : shadowMode ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{!isOn ? "OFF" : shadowMode ? "SHADOW" : "ON"}</span>
+              </div>
+              <p className="mt-1.5 max-w-xl text-sm leading-6 text-[#64748B]">{!isOn ? "WEBASI is silent. Incoming messages are logged, but no replies will be sent until you turn it back on." : shadowMode ? "WEBASI is drafting grounded replies for review. Shadow mode does not send messages to clients." : "WEBASI is replying to clients using your active project knowledge. You can take over any chat at any time."}</p>
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-[#64748B]">
+                <span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-[#22C55E]" />{activeProject ? "Active project ready" : "Awaiting project"}</span>
+                <span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-[#2563FF]" />24-hour window only</span>
+                {shadowMode && <span className="inline-flex items-center gap-1.5 text-[#C2410C]"><Eye className="h-3.5 w-3.5" />Drafts only</span>}
+              </div>
+            </div>
+          </div>
+
+          <button onClick={toggleBot} className={cn("relative h-12 w-[104px] shrink-0 rounded-full p-1 transition-colors focus-visible:ring-2 focus-visible:ring-[#2563FF] active:scale-[0.98]", isOn ? "bg-[#2563FF]" : "bg-[#CBD5E1]")} aria-pressed={isOn} aria-label={isOn ? "Turn WEBASI off" : "Turn WEBASI on"}>
+            <span className={cn("absolute top-1 flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-[0_3px_7px_rgba(15,23,42,0.18)] transition-transform", isOn ? "translate-x-[52px]" : "translate-x-0")}>{isOn ? <Check className="h-4 w-4 text-[#2563FF]" /> : <Pause className="h-4 w-4 text-[#94A3B8]" />}</span>
+            <span className={cn("absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "left-4 opacity-100" : "left-4 opacity-0")}>On</span>
+            <span className={cn("absolute inset-y-0 right-4 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "opacity-0" : "opacity-100")}>Off</span>
+          </button>
+        </div>
+      </section>
+
+      <div className="mb-5 grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <section className="webasi-card p-5 sm:p-6">
+          <div className="mb-5 flex items-start justify-between gap-3">
+            <div>
+              <p className="webasi-label mb-2">Active project</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">{activeProjectName}</h2>
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-[#DCFCE7] px-2 py-1 text-[10px] font-bold text-[#15803D]"><StatusDot />{activeProjectStatus}</span>
+              </div>
+            </div>
+            <button className="flex h-8 w-8 items-center justify-center rounded-lg text-[#94A3B8] hover:bg-[#F8FAFC] hover:text-[#1E293B]" aria-label="Project options"><MoreHorizontal className="h-4 w-4" /></button>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Package price</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectPrice}</p></div>
+            <div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Deposit</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectDeposit}</p></div>
+            <div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Timeline</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectTimeline}</p></div>
+            <div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Knowledge</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{activeProject ? `${activeProject.readiness ?? 100}% ready` : "Not configured"}</p></div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-4">
+            <span className="text-[11px] text-[#94A3B8]">{projectUpdated}</span>
+            <button onClick={() => setLocation("/projects")} className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2563FF] hover:text-[#1D4ED8]">View project <ChevronRight className="h-3.5 w-3.5" /></button>
+          </div>
+        </section>
+
+        <section className="webasi-card p-5 sm:p-6">
+          <div className="mb-5 flex items-start justify-between">
+            <div>
+              <p className="webasi-label mb-2">Performance</p>
+              <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">This month</h2>
+            </div>
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#EFF6FF] text-[#2563FF]"><TrendingUp className="h-4 w-4" /></div>
+          </div>
+          <div className="flex items-end gap-4">
+            <p className="text-[32px] font-bold leading-none tracking-[-0.06em] text-[#0F172A]">{overview.data?.orders?.length ?? 0}</p>
+            <span className="mb-1 inline-flex items-center gap-1 text-xs font-semibold text-[#16A34A]"><ArrowUpRight className="h-3.5 w-3.5" />{Math.min(99, Math.max(0, overview.data?.orders?.length ?? 0))}% <span className="font-normal text-[#94A3B8]">live pipeline</span></span>
+          </div>
+          <div className="mt-5 flex h-12 items-end gap-1.5">
+            {[32, 48, 40, 55, 62, 70, 64, 72, 68, 79, 84, 92].map((height, index) => (
+              <div key={index} className={cn("flex-1 rounded-t-sm", index === 11 ? "bg-[#2563FF]" : "bg-[#DBEAFE]")} style={{ height: `${height}%` }} />
+            ))}
+          </div>
+          <div className="mt-2 flex justify-between text-[10px] text-[#94A3B8]"><span>{new Date().toLocaleDateString([], { month: "short", day: "numeric" })}</span><span>Now</span></div>
+        </section>
+      </div>
+
+      <div className="mb-5 grid gap-5 xl:grid-cols-[1fr_1fr]">
+        <section className="webasi-card p-5 sm:p-6">
+          <div className="mb-4 flex items-start justify-between">
+            <div>
+              <p className="webasi-label mb-2">Usage guard</p>
+              <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Free-tier limits</h2>
+            </div>
+            <button onClick={() => setLocation("/settings")} className="text-[#94A3B8] hover:text-[#2563FF]" aria-label="Usage settings"><Settings2 className="h-4 w-4" /></button>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <UsageMeter label="WhatsApp messages" value={usage.outboundWhatsApp} limit={settings?.whatsappMonthlyCap ?? 900} unit="Outbound this month" icon={MessageCircle} />
+            <UsageMeter label="Gemini requests" value={usage.geminiRequests} limit={settings?.geminiDailyCap ?? 500} unit="Requests today" icon={Sparkles} tone="violet" />
+          </div>
+
+          <div className="mt-4 flex items-start gap-2 rounded-lg bg-[#FFF7ED] p-3 text-[11px] leading-5 text-[#9A3412]">
+            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>You’ll be warned at 70% and automatically paused at 90%. Change caps in Settings.</span>
+          </div>
+        </section>
+
+        <section className="webasi-card p-5 sm:p-6">
+          <div className="mb-4 flex items-start justify-between">
+            <div>
+              <p className="webasi-label mb-2">Needs your attention</p>
+              <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">{attentionTitle}</h2>
+            </div>
+            <Bell className="h-4 w-4 text-[#F59E0B]" />
+          </div>
+
+          <div className="space-y-2">
+            {attentionItems.length ? attentionItems.map((item) => {
+              const Icon = item.icon;
+              const colors = item.tone === "blue" ? "bg-[#EFF6FF] text-[#2563FF]" : item.tone === "amber" ? "bg-[#FFF7ED] text-[#F59E0B]" : "bg-[#F5F3FF] text-[#7C3AED]";
+
+              return (
+                <button key={item.title} onClick={() => setLocation(item.path)} className="group flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-[#F8FAFC]">
+                  <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", colors)}><Icon className="h-4 w-4" /></div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-[#1E293B]">{item.title}</p>
+                    <p className="mt-0.5 truncate text-[11px] text-[#94A3B8]">{item.detail}</p>
+                  </div>
+                  <span className="flex items-center gap-1 text-[11px] font-semibold text-[#2563FF] opacity-0 transition group-hover:opacity-100">{item.action}<ChevronRight className="h-3 w-3" /></span>
+                </button>
+              );
+            }) : <div className="rounded-lg border border-dashed border-[#E2E8F0] px-3 py-4 text-xs text-[#64748B]">Everything looks clear right now.</div>}
+          </div>
+        </section>
+      </div>
+
+      <section className="webasi-card overflow-hidden p-5 sm:p-6">
+        <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="webasi-label mb-2">Recent activity</p>
+            <h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Conversations</h2>
+          </div>
+          <button onClick={() => setLocation("/conversations")} className="inline-flex items-center gap-1 text-xs font-semibold text-[#2563FF] hover:text-[#1D4ED8]">View all <ChevronRight className="h-3.5 w-3.5" /></button>
+        </div>
+
+        <div className="divide-y divide-[#F1F5F9]">
+          {recentConversations.length ? recentConversations.map((conversation) => (
+            <button key={conversation.name} onClick={() => setLocation("/conversations")} className="flex w-full items-center gap-3 py-3 text-left transition first:pt-0 last:pb-0 hover:bg-[#FAFCFF]">
+              <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", conversation.tone === "blue" ? "bg-[#DBEAFE] text-[#1D4ED8]" : conversation.tone === "amber" ? "bg-[#FFEDD5] text-[#C2410C]" : conversation.tone === "green" ? "bg-[#DCFCE7] text-[#15803D]" : "bg-[#EDE9FE] text-[#6D28D9]")}>{conversation.initials}</div>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <p className="text-xs font-semibold text-[#1E293B]">{conversation.name}</p>
+                  {conversation.unread && <span className="h-1.5 w-1.5 rounded-full bg-[#2563FF]" />}
+                </div>
+                <p className="mt-0.5 truncate text-xs text-[#64748B]">{conversation.message}</p>
+              </div>
+
+              <div className="hidden shrink-0 text-right sm:block">
+                <p className="text-[10px] text-[#94A3B8]">{conversation.time}</p>
+                <span className="mt-1 inline-flex rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-medium text-[#64748B]">{conversation.state}</span>
+              </div>
+              <ChevronRight className="h-4 w-4 shrink-0 text-[#CBD5E1] sm:hidden" />
+            </button>
+          )) : <div className="p-4 text-xs text-[#64748B]">No recent conversations are available yet.</div>}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+/*
+function cn(...classes: Array<string | false | null | undefined>) { return classes.filter(Boolean).join(" "); }
+
+function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: ReactNode }) {
+  return (
+    <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <p className="webasi-label mb-2">{eyebrow}</p>
+        <h1 className="text-[26px] font-bold tracking-[-0.035em] text-[#0F172A] sm:text-[30px]">{title}</h1>
+        <p className="mt-1.5 max-w-2xl text-sm leading-6 text-[#64748B]">{description}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function StatusDot({ color = "#22C55E" }: { color?: string }) { return <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color }} />; }
+
+function UsageMeter({ label, value, limit, unit, icon: Icon, tone = "blue" }: { label: string; value: number; limit: number; unit: string; icon: typeof MessageCircle; tone?: "blue" | "violet" }) {
+  const percent = Math.round((value / limit) * 100);
+  return (
+    <div className="rounded-xl border border-[#E2E8F0] bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-center gap-2.5"><div className={cn("flex h-8 w-8 items-center justify-center rounded-lg", tone === "blue" ? "bg-[#EFF6FF] text-[#2563FF]" : "bg-[#F5F3FF] text-[#7C3AED]")}><Icon className="h-4 w-4" /></div><div><p className="text-xs font-semibold text-[#1E293B]">{label}</p><p className="mt-0.5 text-[11px] text-[#94A3B8]">{unit}</p></div></div>
+        <span className="text-lg font-bold tracking-[-0.03em] text-[#0F172A]">{value.toLocaleString()}<span className="text-xs font-medium text-[#94A3B8]"> / {limit.toLocaleString()}</span></span>
+      </div>
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#F1F5F9]"><div className={cn("h-full rounded-full transition-all", percent >= 70 ? "bg-[#F59E0B]" : tone === "blue" ? "bg-[#2563FF]" : "bg-[#8B5CF6]")} style={{ width: `${percent}%` }} /></div>
+      <div className="mt-2 flex items-center justify-between text-[10px] font-medium"><span className={percent >= 70 ? "text-[#D97706]" : "text-[#64748B]"}>{percent}% used</span><span className="text-[#94A3B8]">Resets in 9 days</span></div>
+    </div>
+  );
+}
+
+function HomePage() {
+  const [isOn, setIsOn] = useState(true);
+  const [, setLocation] = useLocation();
+  const overview = trpc.dashboard.overview.useQuery(undefined, { retry: false });
+  const whatsappStatus = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 8000, retry: false });
+  const settings = overview.data?.settings;
+  const activeProject = overview.data?.activeProject ?? null;
+  const snapshot = activeProject ? parseProjectSnapshot(activeProject.snapshot) : null;
+  const recentConversations = (overview.data?.conversations ?? []).slice(0, 4).map((row) => {
+    const name = row.profileName ?? row.waId;
+    const initials = name.split(/\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
+    const messages = (() => {
+      try {
+        const parsed = JSON.parse(row.recentMessages) as Array<{ role?: string; text?: string }>;
+        const latest = [...parsed].reverse().find((message) => (message.text ?? "").trim());
+        return latest?.text ?? "No message history yet";
+      } catch {
+        return "No message history yet";
+      }
+    })();
+    return {
+      name,
+      initials,
+      message: messages,
+      time: row.updatedAt ? new Date(row.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Now",
+      state: row.state.replaceAll("_", " "),
+      tone: row.isPaused ? "amber" : row.state === "needs_owner" ? "purple" : row.state === "confirmed_by_owner" ? "green" : "blue",
+      unread: row.state === "needs_owner" || row.isPaused,
+    };
+  });
+  const attentionItems = [
+    ...((overview.data?.conversations ?? []).filter((row) => row.state === "needs_owner").slice(0, 2).map((row) => ({
+      title: `${row.profileName ?? row.waId} needs owner review`,
+      detail: "Manual follow-up required before continuing automation.",
+      action: "Review",
+      icon: AlertCircle,
+      tone: "amber",
+      path: "/conversations",
+    }))),
+    ...((overview.data?.orders ?? []).filter((order) => order.state === "awaiting_deposit").slice(0, 2).map((order) => ({
+      title: `Deposit pending for ${order.packageName}`,
+      detail: `${order.orderKey} is waiting for confirmation.`,
+      action: "Verify",
+      icon: WalletCards,
+      tone: "blue",
+      path: "/orders",
+    }))),
+  ];
+  const whatsappLabel = whatsappStatus.data?.status === "connected" ? "connected" : whatsappStatus.data?.status === "reconnect_required" ? "reconnect required" : whatsappStatus.data?.status === "disconnected" ? "disconnected" : "connecting";
+  const shadowMode = settings?.shadowMode ?? false;
+  const usage = overview.data?.usage ?? { outboundWhatsApp: 0, geminiRequests: 0 };
+  const businessName = settings?.businessName?.trim() || "Your business";
+  const greeting = (() => {
+    const hour = new Date().getHours();
+    if (hour < 12) return "Good morning";
+    if (hour < 18) return "Good afternoon";
+    return "Good evening";
+  })();
+  const todayLabel = new Intl.DateTimeFormat("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" }).format(new Date());
+  const updateSettings = trpc.settings.update.useMutation({ onSuccess: (ok) => { if (!ok) { setIsOn(false); toast.error("WEBASI cannot turn on without an active approved project"); } overview.refetch(); }, onError: (error) => { setIsOn(!isOn); toast.error(error.message); } });
+  useEffect(() => { if (settings) setIsOn(settings.webasiEnabled); }, [settings?.webasiEnabled]);
+  const toggleBot = () => {
+    const next = !isOn;
+    if (next && !window.confirm(`Enable WEBASI live replies for ${activeProject?.name ?? "the active project"}? Incoming client messages may receive automated responses while WhatsApp is connected. You can turn it off at any time.`)) return;
     setIsOn(next);
     updateSettings.mutate({ webasiEnabled: next });
     toast(next ? "WEBASI is now live" : "WEBASI is off — no messages will be sent", { description: next ? "Replies are enabled for the active project." : "Incoming messages will still be logged." });
   };
+  const activeProjectName = activeProject?.name ?? "No active project";
+  const activeProjectStatus = activeProject?.status ? activeProject.status.replaceAll("_", " ") : "Not configured";
+  const projectPrice = snapshot?.priceLkr ? `LKR ${snapshot.priceLkr.toLocaleString()}` : activeProject ? "Custom package" : "—";
+  const projectDeposit = snapshot?.depositPercent ? `${snapshot.depositPercent}%` : activeProject ? "Varies" : "—";
+  const projectTimeline = snapshot?.timelineBusinessDays || "—";
+  const projectUpdated = activeProject?.updatedAt ? new Date(activeProject.updatedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "No active project yet";
+  const attentionTitle = attentionItems.length ? `${attentionItems.length} item${attentionItems.length === 1 ? "" : "s"} to review` : "No items to review";
   return (
     <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
       <div className="mb-7 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
-        <div><p className="webasi-label mb-2">Monday, September 21, 2026</p><h1 className="text-[28px] font-bold tracking-[-0.045em] text-[#0F172A] sm:text-[32px]">Good morning, Anuradha<span className="text-[#2563FF]">.</span></h1><p className="mt-1.5 text-sm text-[#64748B]">Here’s what’s happening with your WhatsApp sales assistant.</p></div>
+          <div><p className="webasi-label mb-2">{todayLabel}</p><h1 className="text-[28px] font-bold tracking-[-0.045em] text-[#0F172A] sm:text-[32px]">{greeting}, {businessName}<span className="text-[#2563FF]">.</span></h1><p className="mt-1.5 text-sm text-[#64748B]">Here’s what’s happening with your WhatsApp sales assistant.</p></div>
         <div className="flex flex-wrap items-center gap-2.5 self-start rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 shadow-[0_4px_12px_-8px_rgba(15,23,42,0.25)]"><StatusDot color={isOn ? "#22C55E" : "#94A3B8"} /><span className="text-xs font-semibold text-[#1E293B]">{isOn ? "WEBASI is live" : "WEBASI is off"}</span><span className="ml-1 text-[11px] text-[#94A3B8]">{isOn ? "Since 9:12 AM" : "Replies paused"}</span><span className="h-4 w-px bg-[#E2E8F0]" /><StatusDot color={whatsappLabel === "connected" ? "#22C55E" : whatsappLabel === "reconnect required" ? "#DC2626" : "#F59E0B"} /><span className={cn("text-[11px] font-semibold", whatsappLabel === "reconnect required" ? "text-[#B91C1C]" : "text-[#64748B]")}>WhatsApp {whatsappLabel}</span></div>
       </div>
 
@@ -131,6 +473,8 @@ function HomePage() {
         <div className="pointer-events-none absolute right-0 top-0 h-full w-1/2 bg-[radial-gradient(circle_at_80%_20%,rgba(37,99,255,0.10),transparent_58%)]" />
           <div className="relative flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-4 sm:gap-5"><div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-[0_8px_18px_-10px_rgba(37,99,255,0.6)]", isOn ? "bg-[#2563FF] text-white" : "bg-[#F1F5F9] text-[#94A3B8]")}><Zap className="h-6 w-6" /></div><div><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Automation control</h2><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", isOn && !shadowMode ? "bg-[#DCFCE7] text-[#15803D]" : shadowMode ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{!isOn ? "OFF" : shadowMode ? "SHADOW" : "ON"}</span></div><p className="mt-1.5 max-w-xl text-sm leading-6 text-[#64748B]">{!isOn ? "WEBASI is silent. Incoming messages are logged, but no replies will be sent until you turn it back on." : shadowMode ? "WEBASI is drafting grounded replies for review. Shadow mode does not send messages to clients." : "WEBASI is replying to clients using your active project knowledge. You can take over any chat at any time."}</p><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-[#64748B]"><span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-[#22C55E]" />Active project ready</span><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-[#2563FF]" />24-hour window only</span>{shadowMode && <span className="inline-flex items-center gap-1.5 text-[#C2410C]"><Eye className="h-3.5 w-3.5" />Drafts only</span>}</div></div></div>
+                    <div className="flex items-start gap-4 sm:gap-5"><div className={cn("flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl shadow-[0_8px_18px_-10px_rgba(37,99,255,0.6)]", isOn ? "bg-[#2563FF] text-white" : "bg-[#F1F5F9] text-[#94A3B8]")}><Zap className="h-6 w-6" /></div><div><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">Automation control</h2><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", isOn && !shadowMode ? "bg-[#DCFCE7] text-[#15803D]" : shadowMode ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{!isOn ? "OFF" : shadowMode ? "SHADOW" : "ON"}</span></div><p className="mt-1.5 max-w-xl text-sm leading-6 text-[#64748B]">{!isOn ? "WEBASI is silent. Incoming messages are logged, but no replies will be sent until you turn it back on." : shadowMode ? "WEBASI is drafting grounded replies for review. Shadow mode does not send messages to clients." : "WEBASI is replying to clients using your active project knowledge. You can take over any chat at any time."}</p><div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-medium text-[#64748B]"><span className="inline-flex items-center gap-1.5"><CheckCircle2 className="h-3.5 w-3.5 text-[#22C55E]" />{activeProject ? "Active project ready" : "Awaiting project"}</span><span className="inline-flex items-center gap-1.5"><ShieldCheck className="h-3.5 w-3.5 text-[#2563FF]" />24-hour window only</span>{shadowMode && <span className="inline-flex items-center gap-1.5 text-[#C2410C]"><Eye className="h-3.5 w-3.5" />Drafts only</span>}</div></div></div>
+            <section className="webasi-card p-5 sm:p-6"><div className="mb-5 flex items-start justify-between gap-3"><div><p className="webasi-label mb-2">Active project</p><div className="flex flex-wrap items-center gap-2"><h2 className="text-lg font-bold tracking-[-0.025em] text-[#0F172A]">{activeProjectName}</h2><span className="inline-flex items-center gap-1.5 rounded-full bg-[#DCFCE7] px-2 py-1 text-[10px] font-bold text-[#15803D]"><StatusDot />{activeProjectStatus}</span></div></div><button className="flex h-8 w-8 items-center justify-center rounded-lg text-[#94A3B8] hover:bg-[#F8FAFC] hover:text-[#1E293B]" aria-label="Project options"><MoreHorizontal className="h-4 w-4" /></button></div><div className="grid grid-cols-2 gap-3 sm:grid-cols-4"><div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Package price</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectPrice}</p></div><div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Deposit</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectDeposit}</p></div><div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Timeline</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{projectTimeline}</p></div><div className="rounded-xl bg-[#F8FAFC] p-3"><p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-[#94A3B8]">Knowledge</p><p className="mt-2 text-sm font-bold text-[#1E293B]">{activeProject ? `${activeProject.readiness ?? 100}% ready` : "Not configured"}</p></div></div><div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-[#E2E8F0] pt-4"><span className="text-[11px] text-[#94A3B8]">{projectUpdated}</span><button onClick={() => setLocation("/projects")} className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#2563FF] hover:text-[#1D4ED8]">View project <ChevronRight className="h-3.5 w-3.5" /></button></div>
           <button onClick={toggleBot} className={cn("relative h-12 w-[104px] shrink-0 rounded-full p-1 transition-colors focus-visible:ring-2 focus-visible:ring-[#2563FF] active:scale-[0.98]", isOn ? "bg-[#2563FF]" : "bg-[#CBD5E1")} aria-pressed={isOn} aria-label={isOn ? "Turn WEBASI off" : "Turn WEBASI on"}><span className={cn("absolute top-1 flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-[0_3px_7px_rgba(15,23,42,0.18)] transition-transform", isOn ? "translate-x-[52px]" : "translate-x-0")}>{isOn ? <Check className="h-4 w-4 text-[#2563FF]" /> : <Pause className="h-4 w-4 text-[#94A3B8]" />}</span><span className={cn("absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "left-4 opacity-100" : "left-4 opacity-0")}>On</span><span className={cn("absolute inset-y-0 right-4 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "opacity-0" : "opacity-100")}>Off</span></button>
         </div>
       </section>
@@ -147,6 +491,7 @@ function HomePage() {
     </div>
   );
 }
+*/
 
 function ProjectsPage() {
   const [, setLocation] = useLocation();
@@ -178,7 +523,7 @@ function ConversationsPage() {
   const selected = filtered.find((row) => row.clientId === selectedClientId) ?? filtered[0] ?? null;
   useEffect(() => { if (selected && selected.clientId !== selectedClientId) setSelectedClientId(selected.clientId); }, [selected?.clientId, selectedClientId]);
   const messages = selected ? parseConversationMessages(selected.recentMessages) : [];
-  const initials = (selected?.profileName ?? selected?.waId ?? "?").split(/\\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase();
+  const initials = (selected?.profileName ?? selected?.waId ?? "?").split(/\\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase();
   const lastActivity = selected?.updatedAt ? new Date(selected.updatedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "No activity yet";
   const takeoverSelected = () => { if (!selected || selected.isPaused) return; if (window.confirm("Take over this conversation? WEBASI will stop replying until you resume it.")) pause.mutate({ clientId: selected.clientId }); };
   const resumeSelected = () => { if (!selected || !selected.isPaused) return; if (window.confirm("Resume WEBASI automation for this chat?")) resume.mutate({ clientId: selected.clientId }); };
@@ -186,7 +531,7 @@ function ConversationsPage() {
   return <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
     <PageHeader eyebrow="Workspace / Inbox" title="Conversations" description="Review live WhatsApp chats, see owner takeover state, and resume automation when you are ready." action={<button onClick={() => conversationsQuery.refetch()} className="webasi-button-secondary" disabled={conversationsQuery.isFetching}><RefreshCw className={cn("h-4 w-4", conversationsQuery.isFetching && "animate-spin")} />Refresh</button>} />
     <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <section className="webasi-card overflow-hidden"><div className="border-b border-[#E2E8F0] p-4"><div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-[#94A3B8]" /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] pl-9 pr-3 text-xs outline-none focus:border-[#2563FF]" placeholder="Search conversations" /></div><div className="mt-3 flex flex-wrap gap-1.5"><button onClick={() => setFilter("all")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-bold", filter === "all" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F8FAFC] text-[#64748B]")}>All {rows.length}</button><button onClick={() => setFilter("paused")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "paused" ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F8FAFC] text-[#64748B]")}>Paused {rows.filter((row) => row.isPaused).length}</button><button onClick={() => setFilter("needs_owner")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "needs_owner" ? "bg-[#FEF2F2] text-[#B91C1C]" : "bg-[#F8FAFC] text-[#64748B]")}>Needs owner {rows.filter((row) => row.state === "needs_owner").length}</button></div></div><div className="divide-y divide-[#F1F5F9]">{conversationsQuery.isLoading ? <div className="p-5 text-xs text-[#94A3B8]">Loading live conversations…</div> : filtered.length === 0 ? <div className="p-5 text-xs text-[#94A3B8]">No live conversations match this search.</div> : filtered.map((item) => { const itemInitials = (item.profileName ?? item.waId).split(/\\s+/).map((part) => part[0]).slice(0, 2).join("").toUpperCase(); return <button key={item.clientId} onClick={() => setSelectedClientId(item.clientId)} className={cn("flex w-full items-start gap-3 p-4 text-left transition", selected?.clientId === item.clientId ? "bg-[#EFF6FF]" : "hover:bg-[#FAFCFF]")}><div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{itemInitials}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-xs font-semibold text-[#1E293B]">{item.profileName ?? item.waId}</p><span className="shrink-0 text-[10px] text-[#94A3B8]">{new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p className="mt-1 truncate text-[11px] text-[#64748B]">{parseConversationMessages(item.recentMessages).at(-1)?.text ?? "No message content"}</p><span className={cn("mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{item.isPaused ? "Paused by owner" : item.state.replaceAll("_", " ")}</span></div></button>; })}</div></section>
+      <section className="webasi-card overflow-hidden"><div className="border-b border-[#E2E8F0] p-4"><div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-[#94A3B8]" /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] pl-9 pr-3 text-xs outline-none focus:border-[#2563FF]" placeholder="Search conversations" /></div><div className="mt-3 flex flex-wrap gap-1.5"><button onClick={() => setFilter("all")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-bold", filter === "all" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F8FAFC] text-[#64748B]")}>All {rows.length}</button><button onClick={() => setFilter("paused")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "paused" ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F8FAFC] text-[#64748B]")}>Paused {rows.filter((row) => row.isPaused).length}</button><button onClick={() => setFilter("needs_owner")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "needs_owner" ? "bg-[#FEF2F2] text-[#B91C1C]" : "bg-[#F8FAFC] text-[#64748B]")}>Needs owner {rows.filter((row) => row.state === "needs_owner").length}</button></div></div><div className="divide-y divide-[#F1F5F9]">{conversationsQuery.isLoading ? <div className="p-5 text-xs text-[#94A3B8]">Loading live conversations…</div> : filtered.length === 0 ? <div className="p-5 text-xs text-[#94A3B8]">No live conversations match this search.</div> : filtered.map((item) => { const itemInitials = (item.profileName ?? item.waId).split(/\\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase(); return <button key={item.clientId} onClick={() => setSelectedClientId(item.clientId)} className={cn("flex w-full items-start gap-3 p-4 text-left transition", selected?.clientId === item.clientId ? "bg-[#EFF6FF]" : "hover:bg-[#FAFCFF]")}><div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{itemInitials}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-xs font-semibold text-[#1E293B]">{item.profileName ?? item.waId}</p><span className="shrink-0 text-[10px] text-[#94A3B8]">{new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p className="mt-1 truncate text-[11px] text-[#64748B]">{parseConversationMessages(item.recentMessages).at(-1)?.text ?? "No message content"}</p><span className={cn("mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{item.isPaused ? "Paused by owner" : item.state.replaceAll("_", " ")}</span></div></button>; })}</div></section>
       <section className="webasi-card flex min-h-[600px] flex-col overflow-hidden">{selected ? <><div className="flex flex-col gap-3 border-b border-[#E2E8F0] p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className={cn("flex h-10 w-10 items-center justify-center rounded-full text-xs font-bold", selected.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{initials}</div><div><p className="text-sm font-bold text-[#1E293B]">{selected.profileName ?? selected.waId}</p><p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#64748B]"><StatusDot color={selected.isPaused ? "#F59E0B" : "#22C55E"} />{selected.isPaused ? "Paused by owner" : "WEBASI active"} · {selected.state.replaceAll("_", " ")}</p></div></div><div className="flex items-center gap-2">{selected.isPaused ? <button onClick={resumeSelected} disabled={resume.isPending} className="webasi-button-primary min-h-9 px-3"><Play className="h-3.5 w-3.5" />{resume.isPending ? "Resuming…" : "Resume automation"}</button> : <><span className="inline-flex items-center gap-1.5 rounded-full bg-[#F0FDF4] px-2.5 py-1.5 text-[10px] font-bold text-[#15803D]"><CheckCircle2 className="h-3.5 w-3.5" />Automation active</span><button onClick={takeoverSelected} disabled={pause.isPending} className="webasi-button-secondary min-h-9 px-3"><Pause className="h-3.5 w-3.5" />{pause.isPending ? "Taking over…" : "Take over"}</button></>}</div></div><div className="flex-1 space-y-4 overflow-auto bg-[#F8FAFC] p-4 sm:p-6">{messages.length === 0 ? <div className="flex h-full items-center justify-center text-xs text-[#94A3B8]">No message history stored yet.</div> : messages.map((message, index) => <div key={"message-" + message.role + "-" + index + "-" + message.text} className={cn("flex", message.role === "assistant" ? "justify-start" : "justify-end")}><div className={cn("max-w-[82%] rounded-2xl px-4 py-3 text-sm leading-6 shadow-sm", message.role === "assistant" ? "rounded-bl-md border border-[#E2E8F0] bg-white text-[#1E293B]" : message.role === "owner" ? "rounded-br-md bg-[#0F766E] text-white" : "rounded-br-md bg-[#2563FF] text-white")}>{message.text}<span className={cn("mt-1 block text-[10px]", message.role === "assistant" ? "text-[#94A3B8]" : "text-blue-100")}>{message.role === "assistant" ? "WEBASI" : message.role === "owner" ? "You · owner" : "Client"}</span></div></div>)}<div className="flex items-center justify-center gap-2 text-[10px] text-[#94A3B8]"><span className="h-px w-10 bg-[#E2E8F0]" />Last activity {lastActivity}<span className="h-px w-10 bg-[#E2E8F0]" /></div></div><div className="border-t border-[#E2E8F0] bg-white p-4"><div className="flex items-end gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-2"><textarea value={ownerDraft} onChange={(event) => setOwnerDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendOwnerMessage(); } }} disabled={!selected.isPaused || ownerMessage.isPending} className="min-h-10 flex-1 resize-none bg-transparent px-2 py-1 text-xs leading-5 outline-none" placeholder={selected.isPaused ? "Type an owner reply…" : "Take over this chat to reply"} /><button onClick={sendOwnerMessage} disabled={!selected.isPaused || !ownerDraft.trim() || ownerMessage.isPending} className="webasi-button-primary min-h-9 px-3"><Send className="h-3.5 w-3.5" />{ownerMessage.isPending ? "Sending…" : "Send"}</button></div><p className="mt-2 text-[10px] text-[#94A3B8]">Owner messages send through the linked WhatsApp device and keep WEBASI paused.</p></div></> : <div className="flex flex-1 items-center justify-center p-8 text-sm text-[#64748B]">No live WhatsApp conversations yet.</div>}</section>
     </div>
   </div>;

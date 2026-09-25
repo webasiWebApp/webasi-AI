@@ -2,9 +2,11 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, conversations, usageCounters, whatsappMessages, users, projects, settings, orders, eventLogs, insights } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { getSupabaseServer } from "./_core/supabase";
 import type { OrderState } from "../shared/webasi";
 
 let _db: ReturnType<typeof drizzle> | null = null;
+const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
@@ -39,6 +41,12 @@ export async function getUserByOpenId(openId: string) {
 }
 
 export async function claimWhatsAppMessage(input: { messageId: string; waId: string; messageType: string }): Promise<boolean> {
+  if (useSupabase()) {
+    const { error } = await getSupabaseServer().from("messages").insert({ message_id: input.messageId, wa_id: input.waId, message_type: input.messageType, direction: "inbound", role: "client" });
+    if (!error) return true;
+    if (error.code === "23505") return false;
+    throw error;
+  }
   const db = await getDb();
   if (!db) return true;
   try { await db.insert(whatsappMessages).values(input); return true; }
@@ -64,6 +72,17 @@ const emptyConversation = (clientId: string, waId: string, profileName?: string)
 });
 
 export async function getConversation(clientId: string, waId: string, profileName?: string): Promise<ConversationSnapshot> {
+  if (useSupabase()) {
+    const { data, error } = await getSupabaseServer().from("conversations").select("*").eq("client_id", clientId).maybeSingle();
+    if (error) throw error;
+    if (!data) {
+      const initial = emptyConversation(clientId, waId, profileName);
+      const { error: insertError } = await getSupabaseServer().from("conversations").insert({ client_id: clientId, wa_id: waId, profile_name: profileName ?? null, state: initial.state, is_paused: false, missing_fields: initial.missingFields, extracted_fields: initial.extractedFields, recent_messages: initial.recentMessages });
+      if (insertError) throw insertError;
+      return initial;
+    }
+    return { clientId: data.client_id, waId: data.wa_id, profileName: data.profile_name ?? undefined, state: data.state as OrderState, isPaused: Boolean(data.is_paused), missingFields: data.missing_fields ?? [], extractedFields: data.extracted_fields ?? {}, recentMessages: data.recent_messages ?? [], lastClientMessageAt: data.last_client_message_at ? new Date(data.last_client_message_at) : undefined };
+  }
   const db = await getDb();
   if (!db) return emptyConversation(clientId, waId, profileName);
   const result = await db.select().from(conversations).where(eq(conversations.clientId, clientId)).limit(1);
@@ -81,6 +100,11 @@ export async function getConversation(clientId: string, waId: string, profileNam
 }
 
 export async function saveConversation(snapshot: ConversationSnapshot): Promise<void> {
+  if (useSupabase()) {
+    const { error } = await getSupabaseServer().from("conversations").update({ wa_id: snapshot.waId, profile_name: snapshot.profileName ?? null, state: snapshot.state, is_paused: snapshot.isPaused, missing_fields: snapshot.missingFields, extracted_fields: snapshot.extractedFields, recent_messages: snapshot.recentMessages, last_client_message_at: snapshot.lastClientMessageAt?.toISOString() ?? null, updated_at: new Date().toISOString() }).eq("client_id", snapshot.clientId);
+    if (error) throw error;
+    return;
+  }
   const db = await getDb();
   if (!db) return;
   await db.update(conversations).set({ waId: snapshot.waId, profileName: snapshot.profileName ?? null, state: snapshot.state, isPaused: snapshot.isPaused ? 1 : 0, missingFields: JSON.stringify(snapshot.missingFields), extractedFields: JSON.stringify(snapshot.extractedFields), recentMessages: JSON.stringify(snapshot.recentMessages), lastClientMessageAt: snapshot.lastClientMessageAt ?? null }).where(eq(conversations.clientId, snapshot.clientId));
@@ -90,6 +114,12 @@ function currentPeriodKey(date = new Date()) { return `${date.getUTCFullYear()}-
 function currentDayKey(date = new Date()) { return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`; }
 
 export async function getUsageCounts(date = new Date()): Promise<{ outboundWhatsApp: number; geminiRequests: number }> {
+  if (useSupabase()) {
+    const period = currentPeriodKey(date);
+    const { data, error } = await getSupabaseServer().from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
+    if (error) throw error;
+    return { outboundWhatsApp: data?.outbound_whatsapp ?? 0, geminiRequests: data?.gemini_requests ?? 0 };
+  }
   const db = await getDb();
   if (!db) return { outboundWhatsApp: 0, geminiRequests: 0 };
   const period = currentPeriodKey(date);
@@ -99,6 +129,16 @@ export async function getUsageCounts(date = new Date()): Promise<{ outboundWhats
 }
 
 export async function incrementUsage(field: "outboundWhatsApp" | "geminiRequests", date = new Date()): Promise<void> {
+  if (useSupabase()) {
+    const period = currentPeriodKey(date);
+    const column = field === "outboundWhatsApp" ? "outbound_whatsapp" : "gemini_requests";
+    const { data, error } = await getSupabaseServer().from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
+    if (error) throw error;
+    const next = (data?.[column] ?? 0) + 1;
+    const { error: upsertError } = await getSupabaseServer().from("usage_counters").upsert({ period_key: period, [column]: next, updated_at: new Date().toISOString() }, { onConflict: "period_key" });
+    if (upsertError) throw upsertError;
+    return;
+  }
   const db = await getDb();
   if (!db) return;
   const period = currentPeriodKey(date);

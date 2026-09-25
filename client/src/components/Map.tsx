@@ -131,6 +131,7 @@ export function MapView({
       console.error("Map container not found");
       return;
     }
+    const mapId = import.meta.env.VITE_GOOGLE_MAP_ID;
     map.current = new window.google.maps.Map(mapContainer.current, {
       zoom: initialZoom,
       center: initialCenter,
@@ -138,7 +139,7 @@ export function MapView({
       fullscreenControl: true,
       zoomControl: true,
       streetViewControl: true,
-      mapId: "DEMO_MAP_ID",
+      ...(mapId ? { mapId } : {}),
     });
     if (onMapReady) {
       onMapReady(map.current);
