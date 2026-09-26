@@ -31,45 +31,58 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
-  app.set("trust proxy", 1); // Render terminates TLS; needed for req.secure and req.ip
-  app.disable("x-powered-by");
-  app.use((_req, res, next) => {
-    res.set({ "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin" });
-    next();
-  });
-  if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
+export const app = express();
+export const server = createServer(app);
+
+app.set("trust proxy", 1); // Render terminates TLS; needed for req.secure and req.ip
+app.disable("x-powered-by");
+app.use((_req, res, next) => {
+  res.set({ "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin" });
+  next();
+});
+
+if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
+
+// On Vercel, long running background processes are not supported.
+if (!process.env.VERCEL) {
   startBaileysTransport().catch((error) => console.error("[Baileys] startup failed", error));
   if (process.env.NODE_ENV !== "test") startAutomation();
-  app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
-  app.get("/health", async (_req, res) => {
-    const supabase = await checkSupabaseConnection();
-    const whatsapp = await (async () => {
-      // Public endpoint: expose only the connection state, never the QR/pairing code or phone number.
-      try { return await import("../whatsapp/baileys").then(async ({ baileysTransport }) => ({ status: (await baileysTransport.getStatus()).status })); }
-      catch { return { status: "reconnect_required" }; }
-    })();
-    const ok = supabase.ok && whatsapp.status !== "reconnect_required";
-    res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase: { ok: supabase.ok }, whatsapp, time: new Date().toISOString() });
-  });
-  app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
-  // The dashboard only sends small JSON payloads; a large limit is a free memory-exhaustion vector.
-  app.use(express.json({ limit: "100kb" }));
-  // tRPC API
-  app.use(
-    "/api/trpc",
-    createExpressMiddleware({
-      router: appRouter,
-      createContext,
-    })
-  );
-  // development mode uses Vite, production mode uses static files
+}
+
+app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
+app.get("/health", async (_req, res) => {
+  const supabase = await checkSupabaseConnection();
+  const whatsapp = await (async () => {
+    // Public endpoint: expose only the connection state, never the QR/pairing code or phone number.
+    try { return await import("../whatsapp/baileys").then(async ({ baileysTransport }) => ({ status: (await baileysTransport.getStatus()).status })); }
+    catch { return { status: "reconnect_required" }; }
+  })();
+  const ok = supabase.ok && whatsapp.status !== "reconnect_required";
+  res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase: { ok: supabase.ok }, whatsapp, time: new Date().toISOString() });
+});
+app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
+
+// The dashboard only sends small JSON payloads; a large limit is a free memory-exhaustion vector.
+app.use(express.json({ limit: "100kb" }));
+
+// tRPC API
+app.use(
+  "/api/trpc",
+  createExpressMiddleware({
+    router: appRouter,
+    createContext,
+  })
+);
+
+// production mode uses static files
+if (process.env.NODE_ENV !== "development") {
+  serveStatic(app);
+}
+
+async function startServer() {
+  // development mode uses Vite
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
-  } else {
-    serveStatic(app);
   }
 
   const preferredPort = parseInt(process.env.PORT || "3000");
@@ -84,4 +97,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+// Only start the server if we're not in a serverless environment like Vercel
+if (!process.env.VERCEL) {
+  startServer().catch(console.error);
+}
