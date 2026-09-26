@@ -73,7 +73,7 @@ class BaileysTransport {
   private async connect() {
     this.status = this.reconnectAttempt ? "reconnecting" : "connecting";
     const auth = await createDatabaseAuthState();
-    this.socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: false, syncFullHistory: false });
+    this.socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: true, syncFullHistory: false });
     this.socket.ev.on("creds.update", (creds) => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
     this.socket.ev.on("connection.update", (update) => this.handleConnection(update, auth).catch((error) => console.error("[Baileys] connection update failed", error)));
     this.socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
@@ -90,6 +90,7 @@ class BaileysTransport {
     }
     if (update.connection === "open") {
       this.status = "connected"; this.pairingCode = undefined; this.qr = undefined; this.reconnectAttempt = 0; this.lastError = undefined;
+      try { await this.socket?.sendPresenceUpdate("available"); console.log("[Baileys] Presence set to available"); } catch (_) {}
       await recordEvent({ eventType: "baileys_connected", title: "WhatsApp connected", detail: "The linked-device transport is connected." });
     }
     if (update.connection === "close") {
@@ -115,17 +116,21 @@ class BaileysTransport {
   }
 
   private async handleInbound(message: WAMessage) {
-    const remoteJid = message.key.remoteJid ?? "";
-    if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) { if (message.key.fromMe && remoteJid) { const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? ""; await pauseConversationByWaId(remoteJid.split("@")[0]); if (ownerText) await recordOwnerMessageByWaId(remoteJid.split("@")[0], ownerText); } return; }
-    const waId = remoteJid.split("@")[0];
-    const content = message.message;
-    if (!content) return;
-    const image = content.imageMessage;
-    const text = content.conversation ?? content.extendedTextMessage?.text ?? image?.caption;
-    const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : "unsupported";
-    const parsed: ParsedWhatsAppMessage = { id: message.key.id ?? `${waId}-${Date.now()}`, from: waId, waId, profileName: message.pushName ?? undefined, type, text: text ? { body: text } : undefined, image: image ? { id: message.key.id ?? undefined, caption: image.caption ?? undefined, mime_type: image.mimetype ?? undefined } : undefined };
-    await recordEvent({ eventType: "baileys_message_received", title: "WhatsApp message received", detail: `${type} message from ${message.pushName ?? waId}.`, clientId: `baileys:${waId}` });
-    await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText(input) });
+    try {
+      const remoteJid = message.key.remoteJid ?? "";
+      if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) { if (message.key.fromMe && remoteJid) { const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? ""; await pauseConversationByWaId(remoteJid.split("@")[0]); if (ownerText) await recordOwnerMessageByWaId(remoteJid.split("@")[0], ownerText); } return; }
+      const waId = remoteJid.split("@")[0];
+      const content = message.message;
+      if (!content) return;
+      const image = content.imageMessage;
+      const text = content.conversation ?? content.extendedTextMessage?.text ?? image?.caption;
+      const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : "unsupported";
+      const parsed: ParsedWhatsAppMessage = { id: message.key.id ?? `${waId}-${Date.now()}`, from: waId, waId, profileName: message.pushName ?? undefined, type, text: text ? { body: text } : undefined, image: image ? { id: message.key.id ?? undefined, caption: image.caption ?? undefined, mime_type: image.mimetype ?? undefined } : undefined };
+      await recordEvent({ eventType: "baileys_message_received", title: "WhatsApp message received", detail: `${type} message from ${message.pushName ?? waId} (${remoteJid}).`, clientId: `baileys:${waId}` });
+      await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText({ ...input, to: remoteJid }) });
+    } catch (error) {
+      console.error("[Baileys] Unexpected error handling inbound message", error);
+    }
   }
 
   async startPairing() {
@@ -137,7 +142,10 @@ class BaileysTransport {
   }
 
   async sendText(input: { to: string; body: string }): Promise<BaileysSendResult> {
-    if (!this.socket || this.status !== "connected") return { accepted: false, reason: "baileys_not_connected" };
+    if (!this.socket || this.status !== "connected") {
+      console.warn(`[Baileys] Cannot send: socket=${!!this.socket} status=${this.status}`);
+      return { accepted: false, reason: "baileys_not_connected" };
+    }
     const jid = input.to.includes("@") ? input.to : `${input.to}@s.whatsapp.net`;
     const now = Date.now(); const recent = (this.recentSends.get(jid) ?? []).filter((time) => now - time < 60000);
     if (!canSendBaileysMessage(recent, now)) {
@@ -145,10 +153,21 @@ class BaileysTransport {
       if (recent.length >= ENV.baileysRateLimitPerMinute) return { accepted: false, reason: "baileys_rate_limited" };
       if (last) await sleep(Math.max(0, 2500 - (now - last)));
     }
-    const sent = await this.socket.sendMessage(jid, { text: input.body });
-    this.recentSends.set(jid, [...recent, Date.now()]);
-    await recordEvent({ eventType: "baileys_message_sent", title: "WhatsApp message sent", detail: `Reply sent to ${jid}.`, clientId: `baileys:${input.to}` });
-    return { accepted: true, messageId: sent?.key?.id ?? undefined };
+    try {
+      await this.socket.presenceSubscribe(jid);
+      await sleep(200);
+      await this.socket.sendPresenceUpdate("composing", jid);
+      await sleep(500);
+      await this.socket.sendPresenceUpdate("paused", jid);
+      const sent = await this.socket.sendMessage(jid, { text: input.body });
+      console.log(`[Baileys] Message sent to ${jid}, key=${sent?.key?.id}`);
+      this.recentSends.set(jid, [...recent, Date.now()]);
+      await recordEvent({ eventType: "baileys_message_sent", title: "WhatsApp message sent", detail: `Reply sent to ${jid}.`, clientId: `baileys:${input.to}` });
+      return { accepted: true, messageId: sent?.key?.id ?? undefined };
+    } catch (error) {
+      console.error(`[Baileys] sendMessage FAILED for ${jid}:`, error);
+      return { accepted: false, reason: `send_failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
 }
 

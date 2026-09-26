@@ -19,6 +19,8 @@ export const ENV = {
   geminiDailyCap: Number(process.env.GEMINI_DAILY_CAP ?? 500),
   geminiApiKey: process.env.GEMINI_API_KEY ?? "",
   geminiModel: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+  groqApiKey: process.env.GROQ_API_KEY ?? "",
+  aiProvider: process.env.AI_PROVIDER ?? "gemini",
   webasiEnabled: process.env.WEBASI_ENABLED !== "false",
   webasiLlmModel: process.env.WEBASI_LLM_MODEL ?? "gemini-3-flash-preview",
   whatsappTransport: process.env.WHATSAPP_TRANSPORT ?? "baileys",

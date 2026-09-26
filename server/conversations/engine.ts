@@ -1,6 +1,7 @@
 import { invokeLLM, type Message } from "../_core/llm";
 import { ENV } from "../_core/env";
 import { invokeGemini } from "../_core/gemini";
+import { invokeGroq } from "../_core/groq";
 import { approvedRestaurantProject, type ApprovedProjectSnapshot } from "./project";
 import { shouldSendReply, type OrderState } from "../../shared/webasi";
 
@@ -77,12 +78,34 @@ function contentToText(content: string | Array<{ type: string; text?: string }>)
 
 function parseStructured(content: string | Array<{ type: string; text?: string }>): StructuredReply {
   const raw = contentToText(content).trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  console.log("[Conversation] Raw LLM output:", raw);
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
   const candidate = start >= 0 && end > start ? raw.slice(start, end + 1) : raw;
-  const parsed = JSON.parse(candidate) as StructuredReply;
-  if (typeof parsed.reply !== "string" || !Array.isArray(parsed.reliedOnFacts)) throw new Error("Invalid structured conversation response");
-  return parsed;
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(candidate);
+  } catch (e) {
+    console.warn(`[Conversation] Failed to parse JSON: ${candidate.slice(0, 50)}...`);
+  }
+  
+  const result: StructuredReply = {
+    reply: typeof parsed.reply === "string" ? parsed.reply : "",
+    extractedFields: typeof parsed.extractedFields === "object" && parsed.extractedFields ? parsed.extractedFields : {},
+    intent: typeof parsed.intent === "string" ? (parsed.intent as any) : "unknown",
+    needsOwner: Boolean(parsed.needsOwner),
+    needsOwnerReason: typeof parsed.needsOwnerReason === "string" ? parsed.needsOwnerReason : null,
+    reliedOnFacts: Array.isArray(parsed.reliedOnFacts) ? parsed.reliedOnFacts : [],
+  };
+  
+  if (!result.reply && !result.needsOwner) {
+    // Force a fallback reply instead of throwing an error
+    result.reply = "I’ll confirm that with the owner and get back to you.";
+    result.needsOwner = true;
+    result.needsOwnerReason = "Model returned empty reply";
+  }
+  
+  return result;
 }
 
 export function validateGroundedReply(reply: string, project: ApprovedProjectSnapshot): { valid: boolean; reason?: string } {
@@ -116,7 +139,7 @@ export function fallbackReply(reason = "I’ll confirm that with the owner and g
   };
 }
 
-export function createConversationEngine({ project = approvedRestaurantProject, callModel = ENV.geminiApiKey ? invokeGemini : invokeLLM }: { project?: ApprovedProjectSnapshot; callModel?: typeof invokeLLM } = {}): ConversationEngine {
+export function createConversationEngine({ project = approvedRestaurantProject, callModel = ENV.aiProvider === "groq" ? invokeGroq : (ENV.geminiApiKey ? invokeGemini : invokeLLM) }: { project?: ApprovedProjectSnapshot; callModel?: typeof invokeLLM } = {}): ConversationEngine {
   return {
     async runTurn(turn) {
       if (!shouldSendReply({ isOn: turn.isOn, withinCustomerWindow: turn.withinCustomerWindow, monthlyOutbound: turn.monthlyOutbound, monthlyCap: turn.monthlyCap })) {

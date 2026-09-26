@@ -59,8 +59,10 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const settings = await getSettings();
   const isOn = deps.isOn ?? settings.webasiEnabled;
 
+  console.log(`[Processor] Incoming ${message.type} from ${message.profileName ?? waId} | isOn=${isOn} shadowMode=${settings.shadowMode}`);
+
   const claimed = await claim({ messageId: message.id, waId, messageType: message.type });
-  if (!claimed) return { accepted: true, duplicate: true, replied: false, reason: "duplicate_message" };
+  if (!claimed) { console.log("[Processor] Skipped: duplicate message"); return { accepted: true, duplicate: true, replied: false, reason: "duplicate_message" }; }
 
   const snapshot = await getState(clientId, waId, message.profileName);
   const now = new Date();
@@ -69,6 +71,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   if (snapshot.state === "new") snapshot.state = "collecting";
 
   if (snapshot.isPaused) {
+    console.log("[Processor] Skipped: conversation is paused");
     await saveState(snapshot);
     return { accepted: true, replied: false, reason: "conversation_paused", state: snapshot.state };
   }
@@ -79,31 +82,38 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   if (message.type === "image") {
     if (snapshot.state === "awaiting_deposit") {
       snapshot.state = nextOrderState(snapshot.state, "slip_received");
-      replyText = "Thanks — I’ve received the payment slip. The owner will verify the transfer and confirm your order.";
+      replyText = "Thanks — I've received the payment slip. The owner will verify the transfer and confirm your order.";
       await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: "Restaurant Website Package", depositAmount: 34000, slipMediaId: message.image?.id, state: "slip_received", notes: "Payment slip received; owner verification required." });
       await event({ eventType: "slip_received", severity: "warning", title: "Deposit slip received", detail: `A payment slip was received from ${message.profileName ?? waId}. Manual verification is required.`, clientId });
       await notify({ title: "WEBASI: deposit slip received", content: `A payment slip was received from ${message.profileName ?? waId}. Open Orders to verify it manually. WEBASI has not confirmed payment.` }).catch(() => false);
     } else {
+      console.log("[Processor] Skipped: image received outside deposit state");
       await saveState(snapshot);
       return { accepted: true, replied: false, reason: "image_logged_outside_deposit_state", state: snapshot.state };
     }
   } else if (message.type !== "text") {
     replyText = "Please type your message here so I can help you with the website package.";
   } else if (!withinWindow || !isOn) {
+    console.log(`[Processor] Skipped: isOn=${isOn} withinWindow=${withinWindow}`);
     await saveState(snapshot);
     return { accepted: true, replied: false, reason: !isOn ? "automation_off" : "customer_window_closed", state: snapshot.state };
   } else {
     const counts = await usage();
     if (!outboundCapAllows(counts.outboundWhatsApp, ENV.whatsappMonthlyCap) || counts.geminiRequests >= ENV.geminiDailyCap) {
+      console.log(`[Processor] Skipped: usage guard (outbound=${counts.outboundWhatsApp} cap=${ENV.whatsappMonthlyCap} gemini=${counts.geminiRequests} geminiCap=${ENV.geminiDailyCap})`);
       await saveState(snapshot);
       return { accepted: true, replied: false, reason: "usage_guard_hard_stop", state: snapshot.state };
     }
     try {
       const activeProject = await getActiveProject();
-      const runEngine = deps.runEngine ?? createConversationEngine({ project: activeProject ?? undefined }).runTurn;
+      const { compileProjectSnapshot } = await import("../module-db");
+      const compiledSnapshot = activeProject ? await compileProjectSnapshot(activeProject.projectKey) : undefined;
+      console.log(`[Processor] Running engine | activeProject=${activeProject?.name ?? "NONE"} provider=${ENV.aiProvider}`);
+      const runEngine = deps.runEngine ?? createConversationEngine({ project: compiledSnapshot ?? undefined }).runTurn;
       structured = await runEngine({ clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages, incomingText: textFor(message), isOn, withinCustomerWindow: withinWindow, monthlyOutbound: counts.outboundWhatsApp, monthlyCap: ENV.whatsappMonthlyCap });
       await increment("geminiRequests");
       replyText = structured.reply;
+      console.log(`[Processor] Engine replied: "${(replyText ?? "").slice(0, 80)}..." needsOwner=${structured.needsOwner}`);
       const merged = mergeExtracted(snapshot, structured);
       snapshot.extractedFields = merged.extractedFields;
       snapshot.missingFields = merged.missingFields;
@@ -124,28 +134,33 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       console.error("[WhatsApp] conversation engine failed", error);
       await event({ eventType: "llm_failure", severity: "error", title: "Conversation engine unavailable", detail: "A neutral holding reply was prepared because the model call failed or was rate limited.", clientId });
       await notify({ title: "WEBASI: AI engine needs attention", content: `The conversation engine failed for ${message.profileName ?? waId}. A neutral holding reply was used.` }).catch(() => false);
-      replyText = "I’m having trouble checking that right now. I’ll ask the owner to follow up.";
+      replyText = "Sorry, I'm having trouble responding right now — please try again shortly.";
     }
   }
 
   if (settings.shadowMode && replyText) {
+    console.log("[Processor] Skipped send: SHADOW MODE is ON — reply drafted but not sent");
     await event({ eventType: "shadow_draft", severity: "info", title: "Shadow-mode draft created", detail: replyText, clientId });
     await saveState(snapshot);
     return { accepted: true, replied: false, reason: "shadow_mode", state: snapshot.state };
   }
 
   if (!replyText || !isOn || !withinWindow) {
+    console.log(`[Processor] Skipped send: replyText=${!!replyText} isOn=${isOn} withinWindow=${withinWindow}`);
     await saveState(snapshot);
     return { accepted: true, replied: false, reason: !isOn ? "automation_off" : "no_reply", state: snapshot.state };
   }
 
   const current = await usage();
   if (!outboundCapAllows(current.outboundWhatsApp, ENV.whatsappMonthlyCap)) {
+    console.log(`[Processor] Skipped send: outbound cap exceeded (${current.outboundWhatsApp} / ${ENV.whatsappMonthlyCap})`);
     await saveState(snapshot);
     return { accepted: true, replied: false, reason: "whatsapp_usage_hard_stop", state: snapshot.state };
   }
 
+  console.log(`[Processor] Sending reply to ${waId}: "${replyText.slice(0, 80)}..."`);
   const result = await sendText({ to: waId, body: replyText });
+  console.log(`[Processor] sendText result: accepted=${result.accepted} reason=${result.reason ?? "none"}`);
   if (result.accepted) {
     await increment("outboundWhatsApp");
     const additions: Array<{ role: "client" | "assistant"; text: string }> = [];

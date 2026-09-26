@@ -11,6 +11,35 @@ type GeminiResponse = {
   error?: { message?: string };
 };
 
+export class RateLimitExceededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RateLimitExceededError";
+  }
+}
+
+const requestTimestamps: number[] = [];
+let rateLimitMutex = Promise.resolve();
+
+async function acquireRateLimit() {
+  const current = rateLimitMutex;
+  let release!: () => void;
+  rateLimitMutex = new Promise(resolve => { release = resolve; });
+  await current;
+  
+  const now = Date.now();
+  while (requestTimestamps.length > 0 && now - requestTimestamps[0] > 60000) {
+    requestTimestamps.shift();
+  }
+  if (requestTimestamps.length >= 20) {
+    const oldest = requestTimestamps[0];
+    const waitTime = 60000 - (now - oldest);
+    if (waitTime > 0) await new Promise(resolve => setTimeout(resolve, waitTime));
+  }
+  requestTimestamps.push(Date.now());
+  release();
+}
+
 function contentToText(content: MessageContent | MessageContent[]): string {
   const parts = Array.isArray(content) ? content : [content];
   return parts.map((part) => typeof part === "string" ? part : part.type === "text" ? part.text : "").filter(Boolean).join("\n");
@@ -47,15 +76,34 @@ export async function invokeGemini(input: InvokeParams): Promise<InvokeResult> {
   const responseSchema = schemaFromResponseFormat(input.response_format ?? input.responseFormat);
   const generationConfig: Record<string, unknown> = { maxOutputTokens: input.max_tokens ?? input.maxTokens ?? 900 };
   if (responseSchema) { generationConfig.responseMimeType = "application/json"; generationConfig.responseSchema = responseSchema; }
-  let response: Response;
-  let body: GeminiResponse;
-  for (let attempt = 0; ; attempt += 1) {
+  let response: Response | undefined;
+  let body: GeminiResponse | undefined;
+  
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    await acquireRateLimit();
     response = await fetch(`${GEMINI_BASE_URL}/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(ENV.geminiApiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, generationConfig }) });
     body = await response.json() as GeminiResponse;
-    if (response.ok || attempt >= 2 || ![429, 500, 502, 503, 504].includes(response.status)) break;
-    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    if (response.ok) break;
+    
+    const isRateLimit = response.status === 429 || body.error?.message?.toLowerCase().includes("quota") || body.error?.message?.toLowerCase().includes("resource_exhausted");
+    if (!isRateLimit && ![500, 502, 503, 504].includes(response.status)) break;
+    if (attempt >= 3) break;
+    
+    let delayMs = 500 * (attempt + 1);
+    if (isRateLimit && body.error?.message) {
+      const match = body.error.message.match(/Please retry in (\d+(?:\.\d+)?)s/);
+      if (match) delayMs = parseFloat(match[1]) * 1000;
+      else delayMs = 2000 * (attempt + 1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  if (!response.ok) throw new Error(body.error?.message ?? `Gemini request failed with status ${response.status}`);
+  
+  if (!response?.ok) {
+    const isRateLimit = response?.status === 429 || body?.error?.message?.toLowerCase().includes("quota") || body?.error?.message?.toLowerCase().includes("resource_exhausted");
+    if (isRateLimit) throw new RateLimitExceededError(body?.error?.message ?? "Gemini API rate limit exceeded");
+    throw new Error(body?.error?.message ?? `Gemini request failed with status ${response?.status}`);
+  }
+  
   const content = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
   if (!content) throw new Error("Gemini returned an empty response");
   return { id: `gemini-${Date.now()}`, created: Math.floor(Date.now() / 1000), model: selectedModel, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }] };
