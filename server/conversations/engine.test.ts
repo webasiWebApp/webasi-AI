@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createConversationEngine, validateGroundedReply } from "./engine";
+import { createConversationEngine, projectFacts, validateGroundedReply } from "./engine";
 import { approvedRestaurantProject } from "./project";
 
 const baseTurn = {
@@ -53,7 +53,7 @@ describe("WEBASI grounded conversation engine", () => {
 
     expect(result.intent).toBe("prompt_injection");
     expect(result.needsOwner).toBe(true);
-    expect(result.reply).toContain("confirm");
+    expect(result.reply).toContain("owner");
     expect(callModel).not.toHaveBeenCalled();
   });
 
@@ -84,7 +84,7 @@ describe("WEBASI grounded conversation engine", () => {
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Can you make it cheaper?" });
 
     expect(result.needsOwner).toBe(true);
-    expect(result.reply).toContain("confirm");
+    expect(result.reply).toContain("owner");
   });
 
   it("does not throw when the model returns malformed JSON", async () => {
@@ -93,5 +93,25 @@ describe("WEBASI grounded conversation engine", () => {
 
     expect(result.reply).toContain("owner");
     expect(result.needsOwner).toBe(true);
+  });
+});
+
+describe("knowledge-grounded validation", () => {
+  it("allows prices, percentages and timelines that appear in approved FAQs or the computed deposit", () => {
+    const project = { ...approvedRestaurantProject, faqs: "Q: Extra page?\nA: Each extra page is LKR 5,000 and adds 2 business days." };
+    const knowledge = projectFacts(project);
+    expect(validateGroundedReply("An extra page is LKR 5,000.", project, knowledge).valid).toBe(true);
+    expect(validateGroundedReply("The 40% deposit is LKR 34,000.", project, knowledge).valid).toBe(true);
+    expect(validateGroundedReply("That adds 2 business days.", project, knowledge).valid).toBe(true);
+    expect(validateGroundedReply("An extra page is LKR 4,000.", project, knowledge).valid).toBe(false);
+  });
+
+  it("passes client memory to the model and returns behaviour signals", async () => {
+    const callModel = vi.fn().mockResolvedValue(modelReply("Hi Nimal, welcome back!", { intentScore: "high", sentiment: "positive", objection: "price", language: "singlish", clientNotes: "Runs a cafe in Kandy" }));
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi again", clientName: "Nimal", clientNotes: "Runs a cafe", daysSinceLastMessage: 3 });
+    const sent = JSON.stringify(callModel.mock.calls[0]?.[0]?.messages);
+    expect(sent).toContain("Runs a cafe");
+    expect(sent).toContain("coming back after about 3 day");
+    expect(result).toMatchObject({ intentScore: "high", sentiment: "positive", objection: "price", language: "singlish", clientNotes: "Runs a cafe in Kandy" });
   });
 });

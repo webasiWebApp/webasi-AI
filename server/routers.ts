@@ -2,24 +2,30 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
-import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
+import { allowLoginAttempt, createSessionToken, passwordMatches, SESSION_TTL_MS } from "./_core/auth";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
-import { approvedRestaurantProject } from "./conversations/project";
+import { outboundCapAllows } from "./conversations/sender";
 import { createConversationEngine } from "./conversations/engine";
 import { parseProjectSnapshot } from "../shared/webasi";
 
 export const appRouter = router({
-  system: systemRouter,
   auth: router({
-    me: publicProcedure.query(opts => opts.ctx.user),
-    logout: publicProcedure.mutation(({ ctx }) => { const cookieOptions = getSessionCookieOptions(ctx.req); ctx.res.clearCookie(COOKIE_NAME, { ...cookieOptions, maxAge: -1 }); return { success: true } as const; }),
+    me: publicProcedure.query(({ ctx }) => ({ authenticated: ctx.isOwner, configured: Boolean(ENV.dashboardPassword) })),
+    login: publicProcedure.input(z.object({ password: z.string().min(1).max(200) })).mutation(({ ctx, input }) => {
+      if (!ENV.dashboardPassword) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Set DASHBOARD_PASSWORD on the server to enable the dashboard." });
+      if (!allowLoginAttempt(ctx.req.ip ?? "unknown")) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many attempts. Try again in 15 minutes." });
+      if (!passwordMatches(input.password)) throw new TRPCError({ code: "UNAUTHORIZED", message: "Wrong password." });
+      ctx.res.cookie(COOKIE_NAME, createSessionToken(), { ...getSessionCookieOptions(ctx.req), maxAge: SESSION_TTL_MS });
+      return { success: true } as const;
+    }),
+    logout: publicProcedure.mutation(({ ctx }) => { ctx.res.clearCookie(COOKIE_NAME, getSessionCookieOptions(ctx.req)); return { success: true } as const; }),
   }),
   dashboard: router({
-    overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversations(), listOrders(), listEvents()]); return { settings: { ...settings, aiProvider: ENV.aiProvider }, activeProject, usage, conversations, orders, events }; }),
+    overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversations(), listOrders(), listEvents()]); return { settings, activeProject, usage, conversations, orders, events }; }),
     conversations: protectedProcedure.query(() => listConversations()),
     orders: protectedProcedure.query(() => listOrders()),
     events: protectedProcedure.query(() => listEvents()),
@@ -29,10 +35,7 @@ export const appRouter = router({
   }),
   settings: router({
     update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
-    updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => {
-      ENV.aiProvider = input.provider;
-      return { success: true, provider: input.provider };
-    }),
+    updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
     create: protectedProcedure.input(z.object({ projectKey: z.string().min(2), name: z.string().min(2), snapshot: z.string().min(2) })).mutation(({ input }) => createProject(input)),
@@ -50,11 +53,12 @@ export const appRouter = router({
       if (!conversation) return { accepted: false, reason: "conversation_not_found" };
       const settings = await getSettings();
       const counts = await getUsageCounts();
-      if (counts.outboundWhatsApp >= settings.whatsappMonthlyCap * 0.9) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
+      if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
       await pauseConversation(input.clientId);
       const result = await baileysTransport.sendText({ to: conversation.waId, body: input.text });
       if (!result.accepted) return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" };
       await incrementUsage("outboundWhatsApp");
+      await captureLearnedAnswer(conversation.waId, input.text);
       await recordOwnerMessageByWaId(conversation.waId, input.text);
       await logMessage({ messageId: result.messageId ?? `owner-${Date.now()}`, clientId: input.clientId, waId: conversation.waId, role: "owner", body: input.text }).catch((error) => console.error("[Dashboard] message log failed", error));
       await recordEvent({ eventType: "dashboard_owner_message", severity: "info", title: "Owner message sent", detail: `Owner sent a dashboard message to ${conversation.profileName ?? conversation.waId}.`, clientId: input.clientId });
@@ -62,7 +66,7 @@ export const appRouter = router({
     }),
   }),
   testChat: router({
-    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string() })), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
+    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
       const projects = await listProjects();
       const selected = projects.find((project) => project.projectKey === input.projectKey);
       if (!selected) throw new TRPCError({ code: "NOT_FOUND", message: "The selected project no longer exists." });
@@ -72,7 +76,8 @@ export const appRouter = router({
       if (!parsedSnapshot && (!training || (!training.approved && !projectIsApproved))) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Complete and approve this project's training before using Test Chat." });
       const snapshot = await compileProjectSnapshot(selected.projectKey);
       if (!snapshot) throw new TRPCError({ code: "NOT_FOUND", message: "Failed to compile project snapshot." });
-      return createConversationEngine({ project: snapshot }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900 });
+      const settings = await getSettings();
+      return createConversationEngine({ project: snapshot, provider: settings.aiProvider }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
     }),
   }),
   whatsapp: router({
@@ -82,7 +87,7 @@ export const appRouter = router({
     reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
-  insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "approved")), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
+  insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), detail: z.string().trim().min(3).max(4000).optional() })).mutation(({ input }) => setInsightStatus(input.id, "approved", input.detail)), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
 });
 
 export type AppRouter = typeof appRouter;

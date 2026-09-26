@@ -1,7 +1,7 @@
 import { ENV } from "../_core/env";
 
 export type SendTextInput = { to: string; body: string };
-export type SendTextResult = { accepted: boolean; messageId?: string; reason?: string };
+export type SendTextResult = { accepted: boolean; messageId?: string; reason?: string; parts?: number };
 
 export function buildTextMessagePayload({ to, body }: SendTextInput) {
   return {

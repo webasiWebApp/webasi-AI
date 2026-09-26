@@ -3,7 +3,6 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerStorageProxy } from "./storageProxy";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -34,23 +33,28 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 async function startServer() {
   const app = express();
   const server = createServer(app);
+  app.set("trust proxy", 1); // Render terminates TLS; needed for req.secure and req.ip
+  app.disable("x-powered-by");
+  app.use((_req, res, next) => {
+    res.set({ "X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin" });
+    next();
+  });
   if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
   startBaileysTransport().catch((error) => console.error("[Baileys] startup failed", error));
   app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
   app.get("/health", async (_req, res) => {
     const supabase = await checkSupabaseConnection();
     const whatsapp = await (async () => {
-      try { return await import("../whatsapp/baileys").then(({ baileysTransport }) => baileysTransport.getStatus()); }
-      catch (error) { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "whatsapp_unavailable" }; }
+      // Public endpoint: expose only the connection state, never the QR/pairing code or phone number.
+      try { return await import("../whatsapp/baileys").then(async ({ baileysTransport }) => ({ status: (await baileysTransport.getStatus()).status })); }
+      catch { return { status: "reconnect_required" }; }
     })();
     const ok = supabase.ok && whatsapp.status !== "reconnect_required";
-    res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase, whatsapp, time: new Date().toISOString() });
+    res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase: { ok: supabase.ok }, whatsapp, time: new Date().toISOString() });
   });
   app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  registerStorageProxy(app);
+  // The dashboard only sends small JSON payloads; a large limit is a free memory-exhaustion vector.
+  app.use(express.json({ limit: "100kb" }));
   // tRPC API
   app.use(
     "/api/trpc",

@@ -16,6 +16,8 @@ export type ApprovedProjectSnapshot = {
   forbiddenTopics: string[];
   samples: string;
   contactDetails: string;
+  faqs?: string;
+  escalationRules?: string;
 };
 
 export const approvedRestaurantProject: ApprovedProjectSnapshot = {

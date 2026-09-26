@@ -16,7 +16,7 @@ describe("resumeConversation", () => {
 
     await expect(resumeConversation("client_live_test")).resolves.toBe(true);
     expect(update).toHaveBeenCalledTimes(1);
-    expect(set).toHaveBeenCalledWith({ isPaused: 0, state: "collecting", updatedAt: expect.any(Date) });
+    expect(set).toHaveBeenCalledWith({ isPaused: 0, updatedAt: expect.any(Date) });
     expect(where).toHaveBeenCalledTimes(1);
   });
 
@@ -29,7 +29,7 @@ describe("resumeConversation", () => {
     getDb.mockResolvedValue({ update, insert });
 
     await expect(pauseConversation("client_live_test")).resolves.toBe(true);
-    expect(set).toHaveBeenCalledWith({ isPaused: 1, state: "paused", updatedAt: expect.any(Date) });
+    expect(set).toHaveBeenCalledWith({ isPaused: 1, updatedAt: expect.any(Date) });
     expect(insertValues).toHaveBeenCalledWith(expect.objectContaining({ eventType: "dashboard_takeover", title: "Conversation taken over", clientId: "client_live_test" }));
   });
 

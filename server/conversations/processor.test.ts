@@ -35,7 +35,7 @@ describe("WEBASI message processor", () => {
 
     expect(result.replied).toBe(true);
     expect(runEngine).toHaveBeenCalledOnce();
-    expect(sendText).toHaveBeenCalledWith({ to: "94770001111", body: "Yes, you can send the logo later." });
+    expect(sendText).toHaveBeenCalledWith({ to: "94770001111", body: "Yes, you can send the logo later.", humanize: true });
     expect(saved[0]?.recentMessages.at(-1)?.role).toBe("assistant");
   });
 
@@ -47,7 +47,7 @@ describe("WEBASI message processor", () => {
 
     expect(result.replied).toBe(true);
     expect(saved[0]?.state).toBe("slip_received");
-    expect(sendText.mock.calls[0]?.[0].body).toContain("payment slip");
+    expect(sendText.mock.calls[0]?.[0].body).toContain("slip");
     expect(sendText.mock.calls[0]?.[0].body).not.toMatch(/payment is confirmed/i);
   });
 

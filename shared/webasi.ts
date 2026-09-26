@@ -108,3 +108,10 @@ export function nextOrderState(current: OrderState, event: "brief_complete" | "s
   if (event === "owner_confirmed" && current === "slip_received") return "confirmed_by_owner";
   return current;
 }
+
+// Quote a CSV cell and neutralise spreadsheet formulas (client-supplied text such as WhatsApp names ends up in exports).
+export function csvCell(value: unknown): string {
+  const raw = String(value ?? "");
+  const text = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  return `"${text.replace(/"/g, '""')}"`;
+}

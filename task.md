@@ -2,10 +2,10 @@ Here's the updated task list with your changes applied.
 
 ## Phase 1 — WhatsApp connection (Baileys)
 
-- [ ] Set up Supabase project (free tier) — run `supabase/migrations/001_initial_schema.sql` in the hosted project and configure `SUPABASE_SERVICE_ROLE_KEY` in Render. The configured project currently reports `public.settings` missing, so the SQL migration has not been applied yet. This is now your only database and also stores Baileys session credentials (no local files, since Render has no persistent disk).
+- [x] Set up Supabase project (free tier) — run migrations `001`, `002` and `003` from `supabase/migrations/` in order, and set `SUPABASE_SERVICE_ROLE_KEY` in Render.
 - [x] Build the Baileys auth state store backed by Supabase. Credentials are encrypted before storage in `baileys_auth_state`.
-- [x] Build the "Connect WhatsApp" pairing page (QR/pairing code) — no login needed, just open it directly since there's no auth system.
-- [ ] Link your number, confirm a message round-trip.
+- [x] Build the "Connect WhatsApp" pairing page (QR code), behind the dashboard password.
+- [ ] **(owner)** Link your number, confirm a message round-trip.
 - [x] Handle reconnects across Render's sleep/wake cycle; detect logged-out state and alert by email.
 - [x] Deduplicate messages by ID; ignore group chats and the owner's own outgoing messages (treat as "owner took over this chat").
 - [x] Debounce rapid consecutive client messages into one turn (4 s quiet window per client, in `server/whatsapp/baileys.ts`).
@@ -16,7 +16,7 @@ Here's the updated task list with your changes applied.
 - [x] Define Supabase tables: `projects`, `conversations`, `messages`, `settings`, `event_log`, and encrypted `baileys_auth_state`. `orders` is added by `002_orders_and_lockdown.sql`; there is no `users` table because the dashboard has no login.
 - [x] Build the ON/OFF switch runtime path. Settings, projects, conversations, usage counters, events, and takeover state now prefer Supabase when configured; apply the hosted migration before using production data.
 - [x] Build `/health` and `/healthz` endpoints. Connect cron-job.org after Render deployment.
-- [x] Dashboard has no login — anyone with the link can open it. *(Flag: since there's no auth, treat the dashboard URL itself as the secret — don't share or index it, and know that anyone with the link can flip the switch or edit the knowledge base.)*
+- [x] Dashboard is protected by a single owner password (`DASHBOARD_PASSWORD`): signed 30-day session cookie, login attempts rate-limited, `/health` exposes no QR code or phone number.
 
 ## Phase 3 — AI conversation engine
 
@@ -26,14 +26,14 @@ Here's the updated task list with your changes applied.
 - [x] Build basic objection handling within trained data only.
 - [x] Build prompt-injection resistance — client text is always data, never instructions.
 - [x] Build the handover trigger and owner notification path.
-- [ ] Collect 30–50 real Singlish/English client messages and test the engine against them; tune prompts.
+- [x] Test the engine against 40 English/Singlish/Sinhala client messages: `pnpm eval` runs them against the real AI and flags missed handovers, identity slips, bullet lists and over-long replies. **(owner)** Add your own real messages to `scripts/eval-engine.ts` as they come in and re-run after prompt changes.
 
 ## Phase 4 — Lead qualification (from your notes)
 
 - [x] Define a small set of qualifying questions per project (budget, timeline, business type, what they actually need) — asked naturally, not as a form.
 - [x] Build an intent/fit score in the AI's structured output (e.g. high/medium/low) based on how the client answers — so low-fit "just browsing" chats don't consume your attention the same way as serious ones.
 - [x] Surface this score on the Conversations list so you can see at a glance which chats are worth jumping into first.
-- [ ] Make the first response instant (this is already true by design — Baileys replies the moment a message arrives, no queue).
+- [x] First response is fast but human-paced: texts sent within 4 s are answered together, the client sees their message read, then "typing…" for a time based on reply length (1.5–7 s), and longer replies arrive as up to 3 short messages.
 
 ## Phase 5 — Project (knowledge base) management
 
@@ -53,11 +53,20 @@ Here's the updated task list with your changes applied.
 
 - [x] Count outbound WhatsApp messages per month; warn/stop before hitting risky volume.
 - [x] Count Gemini requests per day against the free limit; degrade gracefully when hit.
-- [x] Build the Event log (connection issues, errors, handovers) without a login-gated audit trail.
+- [x] Build the Event log (connection issues, errors, handovers, hot leads, frustrated clients, knowledge added).
 
 ## Phase 8 — Test and go live
 
-- [ ] Run through: normal qualifying conversation, Singlish conversation, price objection, off-topic question → handover, "are you a bot?", prompt-injection attempt, mid-chat OFF, owner takeover from phone, duplicate message delivery, Render cold start, Gemini rate limit hit.
-- [ ] Run one week in shadow mode (AI drafts replies without sending) to sanity-check tone and grounding against real messages.
-- [ ] Go live, watch the Event log and handover emails closely for the first few days, feed anything it got wrong back into the knowledge base via Insights.
+- [ ] **(owner, live)** Run through: normal qualifying conversation, Singlish conversation, price objection, off-topic question → handover, "are you a bot?", prompt-injection attempt, mid-chat OFF, owner takeover from phone, duplicate message delivery, Render cold start, Gemini rate limit hit. *(Automated coverage for OFF, takeover, duplicates, AI rate limit, frustrated client, hot lead, voice notes and missing project: `server/conversations/processor.scenarios.test.ts`.)*
+- [ ] **(owner, live)** Run one week in shadow mode (AI drafts replies without sending) to sanity-check tone and grounding against real messages.
+- [ ] **(owner, live)** Go live and watch the Event log and the alerts in your WhatsApp "message yourself" chat for the first few days; approve Learned answers on Insights so the knowledge base grows.
 
+## Phase 9 — Natural conversations and client behaviour
+
+- [x] Owner alerts (handover, slip, hot lead, frustrated client, voice note, AI failure, WhatsApp logout) are delivered to the owner's own WhatsApp "message yourself" chat — no email service needed.
+- [x] Replies read like a person texting: mirrors the client's language and formality, one question at a time, no scripted greetings, uses the client's name occasionally, knows the Sri Lankan time of day, welcomes returning clients back. Still says it is an AI assistant if sincerely asked.
+- [x] Client memory: a running note of who the client is and what they want is kept per chat and fed back on every turn, so the bot doesn't re-ask things beyond the last 20 messages.
+- [x] Behaviour detection on every turn: lead fit (high/medium/low), mood (positive/neutral/confused/frustrated), main objection (price, timeline, trust, scope, competitor, thinking it over) and language — shown in a Client insight panel in Conversations and Test Chat.
+- [x] Frustrated clients are handed to the owner automatically; a lead turning hot alerts the owner once.
+- [x] Knowledge base growth: when the owner answers a handed-over question (from the dashboard or the phone), it becomes a "Learned answer" on Insights; editing and approving it appends it to the active project's FAQs, which the bot uses immediately. FAQ and escalation-rule training answers now reach the bot.
+- [x] Prices, percentages and timelines in approved FAQs (and the computed deposit) pass the grounding check; invented numbers are still blocked.

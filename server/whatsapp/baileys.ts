@@ -1,15 +1,15 @@
-import { DisconnectReason, Browsers, makeWASocket, type WAMessage } from "baileys";
+import { DisconnectReason, Browsers, jidNormalizedUser, makeWASocket, type WAMessage, type WAMessageKey } from "baileys";
 import pino from "pino";
 import { createDatabaseAuthState, saveBaileysCreds, hasBaileysSession, clearBaileysSession } from "./baileys-auth";
 import { ENV } from "../_core/env";
 import { processWhatsAppMessage } from "../conversations/processor";
-import { pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId } from "../module-db";
+import { captureLearnedAnswer, pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 
 export type BaileysConnectionStatus = "disconnected" | "pairing" | "connecting" | "connected" | "reconnecting" | "reconnect_required";
 export type BaileysStatus = { status: BaileysConnectionStatus; phoneNumber?: string; pairingCode?: string; qr?: string; lastError?: string; updatedAt: string; hasSession: boolean };
-export type BaileysSendResult = { accepted: boolean; messageId?: string; reason?: string };
+export type BaileysSendResult = { accepted: boolean; messageId?: string; reason?: string; parts?: number };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export function normalizeBaileysPhone(phoneNumber: string) { return phoneNumber.replace(/\D/g, ""); }
@@ -30,6 +30,15 @@ export function createDebouncer<T>(onFlush: (key: string, items: T[]) => void, d
   };
 }
 export const INBOUND_TEXT_DEBOUNCE_MS = 4000;
+
+// Split a reply at blank lines into at most maxParts WhatsApp bubbles, the way a person sends several short messages.
+export function splitIntoBubbles(body: string, maxParts = 3) {
+  const parts = body.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= maxParts) return parts.length ? parts : [body];
+  return [...parts.slice(0, maxParts - 1), parts.slice(maxParts - 1).join("\n\n")];
+}
+// Roughly how long a person takes to type a message: a short pause plus ~35ms per character, capped.
+export function typingDelayMs(text: string) { return Math.min(7000, Math.max(1500, 1000 + text.length * 35)); }
 export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
 class BaileysTransport {
@@ -44,6 +53,9 @@ class BaileysTransport {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private readonly recentSends = new Map<string, number[]>();
   private inboundQueue = Promise.resolve();
+  private readonly lastInboundKey = new Map<string, WAMessageKey>();
+  // IDs of messages this process sent, so their echoes are never mistaken for the owner typing on the phone.
+  private readonly sentIds = new Set<string>();
   // ponytail: in-memory buffer; texts still waiting when the process restarts are dropped, and only the last message ID in a burst is deduplicated.
   private readonly textBuffer = createDebouncer<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>((_waId, items) => {
     this.inboundQueue = this.inboundQueue.then(() => this.processBatch(items)).catch((error) => console.error("[Baileys] inbound processing failed", error));
@@ -54,6 +66,7 @@ class BaileysTransport {
   async resetSession() {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.socket?.end(undefined);
     this.socket = null;
     const reset = resetBaileysStatus();
     this.status = reset.status;
@@ -87,7 +100,7 @@ class BaileysTransport {
   private async connect() {
     this.status = this.reconnectAttempt ? "reconnecting" : "connecting";
     const auth = await createDatabaseAuthState();
-    this.socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: true, syncFullHistory: false });
+    this.socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: false, syncFullHistory: false });
     this.socket.ev.on("creds.update", (creds) => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
     this.socket.ev.on("connection.update", (update) => this.handleConnection(update, auth).catch((error) => console.error("[Baileys] connection update failed", error)));
     this.socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
@@ -104,7 +117,7 @@ class BaileysTransport {
     }
     if (update.connection === "open") {
       this.status = "connected"; this.pairingCode = undefined; this.qr = undefined; this.reconnectAttempt = 0; this.lastError = undefined;
-      try { await this.socket?.sendPresenceUpdate("available"); console.log("[Baileys] Presence set to available"); } catch (_) {}
+      this.phoneNumber = this.socket?.user?.id ? jidNormalizedUser(this.socket.user.id).split("@")[0] : undefined;
       await recordEvent({ eventType: "baileys_connected", title: "WhatsApp connected", detail: "The linked-device transport is connected." });
     }
     if (update.connection === "close") {
@@ -132,15 +145,25 @@ class BaileysTransport {
   private async handleInbound(message: WAMessage) {
     try {
       const remoteJid = message.key.remoteJid ?? "";
-      if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) { if (message.key.fromMe && remoteJid) { const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? ""; await pauseConversationByWaId(remoteJid.split("@")[0]); if (ownerText) await recordOwnerMessageByWaId(remoteJid.split("@")[0], ownerText); } return; }
       const waId = remoteJid.split("@")[0];
+      if (message.key.id && this.sentIds.has(message.key.id)) return; // our own reply echoing back
+      if (waId && waId === this.phoneNumber) return; // owner's "message yourself" chat, used for alerts
+      if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) {
+        if (message.key.fromMe && remoteJid && !remoteJid.endsWith("@g.us") && remoteJid !== "status@broadcast") {
+          const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? "";
+          await pauseConversationByWaId(waId);
+          if (ownerText) { await captureLearnedAnswer(waId, ownerText); await recordOwnerMessageByWaId(waId, ownerText); }
+        }
+        return;
+      }
       const content = message.message;
       if (!content) return;
+      if (message.key) this.lastInboundKey.set(remoteJid, message.key);
       const image = content.imageMessage;
-      const text = content.conversation ?? content.extendedTextMessage?.text ?? image?.caption;
-      const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : "unsupported";
+      const text = content.conversation ?? content.extendedTextMessage?.text ?? image?.caption ?? undefined;
+      const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : content.reactionMessage ? "reaction" : content.stickerMessage ? "sticker" : "unsupported";
+      if (type === "reaction") return;
       const parsed: ParsedWhatsAppMessage = { id: message.key.id ?? `${waId}-${Date.now()}`, from: waId, waId, profileName: message.pushName ?? undefined, type, text: text ? { body: text } : undefined, image: image ? { id: message.key.id ?? undefined, caption: image.caption ?? undefined, mime_type: image.mimetype ?? undefined } : undefined };
-      await recordEvent({ eventType: "baileys_message_received", title: "WhatsApp message received", detail: `${type} message from ${message.pushName ?? waId} (${remoteJid}).`, clientId: `baileys:${waId}` });
       if (type === "text") { this.textBuffer.push(waId, { parsed, remoteJid }); return; }
       await this.processBatch(this.textBuffer.take(waId));
       await this.processBatch([{ parsed, remoteJid }]);
@@ -166,31 +189,51 @@ class BaileysTransport {
     return this.qr;
   }
 
-  async sendText(input: { to: string; body: string }): Promise<BaileysSendResult> {
-    if (!this.socket || this.status !== "connected") {
-      console.warn(`[Baileys] Cannot send: socket=${!!this.socket} status=${this.status}`);
-      return { accepted: false, reason: "baileys_not_connected" };
-    }
-    const jid = input.to.includes("@") ? input.to : `${input.to}@s.whatsapp.net`;
-    const now = Date.now(); const recent = (this.recentSends.get(jid) ?? []).filter((time) => now - time < 60000);
-    if (!canSendBaileysMessage(recent, now)) {
-      const last = recent.at(-1);
-      if (recent.length >= ENV.baileysRateLimitPerMinute) return { accepted: false, reason: "baileys_rate_limited" };
-      if (last) await sleep(Math.max(0, 2500 - (now - last)));
-    }
+  // Alerts go to the owner's own "message yourself" chat on the linked number.
+  async sendToSelf(body: string): Promise<boolean> {
+    if (!this.socket || this.status !== "connected" || !this.phoneNumber) return false;
     try {
-      await this.socket.presenceSubscribe(jid);
-      await sleep(200);
-      await this.socket.sendPresenceUpdate("composing", jid);
-      await sleep(500);
-      await this.socket.sendPresenceUpdate("paused", jid);
-      const sent = await this.socket.sendMessage(jid, { text: input.body });
-      console.log(`[Baileys] Message sent to ${jid}, key=${sent?.key?.id}`);
-      this.recentSends.set(jid, [...recent, Date.now()]);
-      await recordEvent({ eventType: "baileys_message_sent", title: "WhatsApp message sent", detail: `Reply sent to ${jid}.`, clientId: `baileys:${input.to}` });
-      return { accepted: true, messageId: sent?.key?.id ?? undefined };
+      const sent = await this.socket.sendMessage(`${this.phoneNumber}@s.whatsapp.net`, { text: body });
+      if (sent?.key?.id) this.sentIds.add(sent.key.id);
+      return true;
     } catch (error) {
-      console.error(`[Baileys] sendMessage FAILED for ${jid}:`, error);
+      console.error("[Baileys] owner alert failed", error instanceof Error ? error.message : error);
+      return false;
+    }
+  }
+
+  // humanize: mark the client's message read, show "typing…" for a realistic time, and send short bubbles.
+  async sendText(input: { to: string; body: string; humanize?: boolean }): Promise<BaileysSendResult> {
+    if (!this.socket || this.status !== "connected") return { accepted: false, reason: "baileys_not_connected" };
+    const jid = input.to.includes("@") ? input.to : `${input.to}@s.whatsapp.net`;
+    const parts = input.humanize ? splitIntoBubbles(input.body) : [input.body];
+    const recent = (this.recentSends.get(jid) ?? []).filter((time) => Date.now() - time < 60000);
+    if (recent.length + parts.length > ENV.baileysRateLimitPerMinute) return { accepted: false, reason: "baileys_rate_limited" };
+    try {
+      const socket = this.socket;
+      if (input.humanize) {
+        const key = this.lastInboundKey.get(jid);
+        if (key) await socket.readMessages([key]).catch(() => undefined);
+        await socket.sendPresenceUpdate("available").catch(() => undefined);
+      }
+      let messageId: string | undefined;
+      for (const part of parts) {
+        const last = recent.at(-1);
+        if (!canSendBaileysMessage(recent, Date.now()) && last) await sleep(Math.max(0, 2500 - (Date.now() - last)));
+        await socket.presenceSubscribe(jid).catch(() => undefined);
+        await socket.sendPresenceUpdate("composing", jid);
+        await sleep(input.humanize ? typingDelayMs(part) : 500);
+        await socket.sendPresenceUpdate("paused", jid);
+        const sent = await socket.sendMessage(jid, { text: part });
+        if (sent?.key?.id) { this.sentIds.add(sent.key.id); messageId ??= sent.key.id; }
+        recent.push(Date.now());
+      }
+      if (input.humanize) await socket.sendPresenceUpdate("unavailable").catch(() => undefined);
+      this.recentSends.set(jid, recent);
+      while (this.sentIds.size > 500) this.sentIds.delete(this.sentIds.values().next().value as string);
+      return { accepted: true, messageId, parts: parts.length };
+    } catch (error) {
+      console.error("[Baileys] sendMessage failed", error instanceof Error ? error.message : error);
       return { accepted: false, reason: `send_failed: ${error instanceof Error ? error.message : String(error)}` };
     }
   }

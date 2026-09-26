@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { baileysStatusCode, createDebouncer, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
+import { baileysStatusCode, createDebouncer, splitIntoBubbles, typingDelayMs, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -54,5 +54,17 @@ describe("Inbound text debouncer", () => {
     vi.advanceTimersByTime(2000);
     expect(onFlush).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+describe("human-like sending", () => {
+  it("splits replies into at most three bubbles at blank lines", () => {
+    expect(splitIntoBubbles("Hi!")).toEqual(["Hi!"]);
+    expect(splitIntoBubbles("One\n\nTwo\n\nThree\n\nFour")).toEqual(["One", "Two", "Three\n\nFour"]);
+  });
+  it("types for longer on longer messages, within limits", () => {
+    expect(typingDelayMs("ok")).toBe(1500);
+    expect(typingDelayMs("x".repeat(100))).toBe(4500);
+    expect(typingDelayMs("x".repeat(1000))).toBe(7000);
   });
 });

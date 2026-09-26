@@ -1,12 +1,19 @@
 import { trpc } from "@/lib/trpc";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { httpBatchLink } from "@trpc/client";
+import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { httpBatchLink, TRPCClientError } from "@trpc/client";
 import { createRoot } from "react-dom/client";
 import superjson from "superjson";
 import App from "./App";
 import "./index.css";
 
-const queryClient = new QueryClient();
+// A query failing with UNAUTHORIZED means the session expired: re-check auth so App shows the login screen.
+const queryClient: QueryClient = new QueryClient({
+  queryCache: new QueryCache({
+    onError: (error) => {
+      if (error instanceof TRPCClientError && error.data?.code === "UNAUTHORIZED") queryClient.invalidateQueries({ queryKey: [["auth", "me"]] });
+    },
+  }),
+});
 
 const trpcClient = trpc.createClient({
   links: [

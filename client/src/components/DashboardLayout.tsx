@@ -26,7 +26,9 @@ import {
   Sparkles,
   PanelLeft,
   UserRound,
+  LogOut,
 } from "lucide-react";
+import { trpc } from "@/lib/trpc";
 import { useLocation } from "wouter";
 import { CSSProperties, useEffect, useState } from "react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -67,6 +69,8 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
 function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
   const [location, setLocation] = useLocation();
+  const utils = trpc.useUtils();
+  const logout = trpc.auth.logout.useMutation({ onSuccess: () => utils.auth.me.invalidate() });
   const { state, toggleSidebar } = useSidebar();
   const isMobile = useIsMobile();
   const activeMenuItem = menuItems.find((item) => item.path === location) ?? menuItems[0];
@@ -133,6 +137,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" side="top" className="w-52 rounded-xl border-[#E2E8F0] p-1.5 shadow-[0_12px_30px_rgba(15,23,42,0.12)]">
               <DropdownMenuItem onClick={() => setLocation("/settings")} className="cursor-pointer rounded-lg text-xs"><Settings className="mr-2 h-3.5 w-3.5" />Workspace settings</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => logout.mutate()} className="cursor-pointer rounded-lg text-xs"><LogOut className="mr-2 h-3.5 w-3.5" />Log out</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarFooter>
