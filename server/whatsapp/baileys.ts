@@ -20,6 +20,16 @@ export function baileysStatusCode(error: unknown): number {
   const value = error as { output?: { statusCode?: unknown }; statusCode?: unknown; data?: { statusCode?: unknown } };
   return Number(value?.output?.statusCode ?? value?.statusCode ?? value?.data?.statusCode ?? 0);
 }
+// Collects items per key and flushes them together once the key has been quiet for delayMs.
+export function createDebouncer<T>(onFlush: (key: string, items: T[]) => void, delayMs: number) {
+  const pending = new Map<string, { items: T[]; timer: ReturnType<typeof setTimeout> }>();
+  const take = (key: string): T[] => { const entry = pending.get(key); if (!entry) return []; clearTimeout(entry.timer); pending.delete(key); return entry.items; };
+  return {
+    push(key: string, item: T) { const items = [...take(key), item]; pending.set(key, { items, timer: setTimeout(() => onFlush(key, take(key)), delayMs) }); },
+    take,
+  };
+}
+export const INBOUND_TEXT_DEBOUNCE_MS = 4000;
 export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
 class BaileysTransport {
@@ -34,6 +44,10 @@ class BaileysTransport {
   private reconnectTimer: NodeJS.Timeout | undefined;
   private readonly recentSends = new Map<string, number[]>();
   private inboundQueue = Promise.resolve();
+  // ponytail: in-memory buffer; texts still waiting when the process restarts are dropped, and only the last message ID in a burst is deduplicated.
+  private readonly textBuffer = createDebouncer<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>((_waId, items) => {
+    this.inboundQueue = this.inboundQueue.then(() => this.processBatch(items)).catch((error) => console.error("[Baileys] inbound processing failed", error));
+  }, INBOUND_TEXT_DEBOUNCE_MS);
 
   async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, qr: this.qr, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
 
@@ -127,10 +141,21 @@ class BaileysTransport {
       const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : "unsupported";
       const parsed: ParsedWhatsAppMessage = { id: message.key.id ?? `${waId}-${Date.now()}`, from: waId, waId, profileName: message.pushName ?? undefined, type, text: text ? { body: text } : undefined, image: image ? { id: message.key.id ?? undefined, caption: image.caption ?? undefined, mime_type: image.mimetype ?? undefined } : undefined };
       await recordEvent({ eventType: "baileys_message_received", title: "WhatsApp message received", detail: `${type} message from ${message.pushName ?? waId} (${remoteJid}).`, clientId: `baileys:${waId}` });
-      await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText({ ...input, to: remoteJid }) });
+      if (type === "text") { this.textBuffer.push(waId, { parsed, remoteJid }); return; }
+      await this.processBatch(this.textBuffer.take(waId));
+      await this.processBatch([{ parsed, remoteJid }]);
     } catch (error) {
       console.error("[Baileys] Unexpected error handling inbound message", error);
     }
+  }
+
+  // Rapid consecutive texts from one client become a single turn so WEBASI answers once.
+  private async processBatch(items: Array<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>) {
+    const last = items.at(-1);
+    if (!last) return;
+    const body = items.map((item) => item.parsed.text?.body ?? "").filter(Boolean).join("\n");
+    const parsed = items.length > 1 ? { ...last.parsed, text: { body } } : last.parsed;
+    await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText({ ...input, to: last.remoteJid }) });
   }
 
   async startPairing() {

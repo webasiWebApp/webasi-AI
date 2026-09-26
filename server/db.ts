@@ -40,18 +40,26 @@ export async function getUserByOpenId(openId: string) {
   return result[0];
 }
 
-export async function claimWhatsAppMessage(input: { messageId: string; waId: string; messageType: string }): Promise<boolean> {
+export async function claimWhatsAppMessage(input: { messageId: string; waId: string; messageType: string; clientId?: string; body?: string | null }): Promise<boolean> {
   if (useSupabase()) {
-    const { error } = await getSupabaseServer().from("messages").insert({ message_id: input.messageId, wa_id: input.waId, message_type: input.messageType, direction: "inbound", role: "client" });
+    const { error } = await getSupabaseServer().from("messages").insert({ message_id: input.messageId, client_id: input.clientId ?? null, wa_id: input.waId, message_type: input.messageType, body: input.body ?? null, direction: "inbound", role: "client" });
     if (!error) return true;
     if (error.code === "23505") return false;
     throw error;
   }
   const db = await getDb();
   if (!db) return true;
-  try { await db.insert(whatsappMessages).values(input); return true; }
+  try { await db.insert(whatsappMessages).values({ messageId: input.messageId, waId: input.waId, messageType: input.messageType }); return true; }
   catch (error: any) { if (error?.code === "ER_DUP_ENTRY" || error?.errno === 1062) return false; throw error; }
 }
+
+export async function logMessage(input: { messageId: string; clientId: string; waId: string; role: "assistant" | "owner"; body: string; topic?: string | null; intentScore?: IntentScore | null; handedOver?: boolean }): Promise<void> {
+  if (!useSupabase()) return; // ponytail: the MySQL schema has no message log table; Supabase is the production store.
+  const { error } = await getSupabaseServer().from("messages").upsert({ message_id: input.messageId, client_id: input.clientId, wa_id: input.waId, direction: "outbound", role: input.role, message_type: "text", body: input.body, topic: input.topic ?? null, intent_score: input.intentScore ?? null, handed_over: input.handedOver ?? false }, { onConflict: "message_id" });
+  if (error) throw error;
+}
+
+export type IntentScore = "high" | "medium" | "low";
 
 export type ConversationSnapshot = {
   clientId: string;
@@ -63,6 +71,8 @@ export type ConversationSnapshot = {
   extractedFields: Record<string, string | null>;
   recentMessages: Array<{ role: "client" | "assistant" | "owner"; text: string }>;
   lastClientMessageAt?: Date;
+  intentScore?: IntentScore | null;
+  handedOver?: boolean;
 };
 
 const emptyConversation = (clientId: string, waId: string, profileName?: string): ConversationSnapshot => ({
@@ -81,7 +91,7 @@ export async function getConversation(clientId: string, waId: string, profileNam
       if (insertError) throw insertError;
       return initial;
     }
-    return { clientId: data.client_id, waId: data.wa_id, profileName: data.profile_name ?? undefined, state: data.state as OrderState, isPaused: Boolean(data.is_paused), missingFields: data.missing_fields ?? [], extractedFields: data.extracted_fields ?? {}, recentMessages: data.recent_messages ?? [], lastClientMessageAt: data.last_client_message_at ? new Date(data.last_client_message_at) : undefined };
+    return { clientId: data.client_id, waId: data.wa_id, profileName: data.profile_name ?? undefined, state: data.state as OrderState, isPaused: Boolean(data.is_paused), missingFields: data.missing_fields ?? [], extractedFields: data.extracted_fields ?? {}, recentMessages: data.recent_messages ?? [], lastClientMessageAt: data.last_client_message_at ? new Date(data.last_client_message_at) : undefined, intentScore: data.intent_score ?? null, handedOver: Boolean(data.handed_over) };
   }
   const db = await getDb();
   if (!db) return emptyConversation(clientId, waId, profileName);
@@ -101,7 +111,7 @@ export async function getConversation(clientId: string, waId: string, profileNam
 
 export async function saveConversation(snapshot: ConversationSnapshot): Promise<void> {
   if (useSupabase()) {
-    const { error } = await getSupabaseServer().from("conversations").update({ wa_id: snapshot.waId, profile_name: snapshot.profileName ?? null, state: snapshot.state, is_paused: snapshot.isPaused, missing_fields: snapshot.missingFields, extracted_fields: snapshot.extractedFields, recent_messages: snapshot.recentMessages, last_client_message_at: snapshot.lastClientMessageAt?.toISOString() ?? null, updated_at: new Date().toISOString() }).eq("client_id", snapshot.clientId);
+    const { error } = await getSupabaseServer().from("conversations").update({ wa_id: snapshot.waId, profile_name: snapshot.profileName ?? null, state: snapshot.state, is_paused: snapshot.isPaused, missing_fields: snapshot.missingFields, extracted_fields: snapshot.extractedFields, recent_messages: snapshot.recentMessages, last_client_message_at: snapshot.lastClientMessageAt?.toISOString() ?? null, intent_score: snapshot.intentScore ?? null, handed_over: snapshot.handedOver ?? false, updated_at: new Date().toISOString() }).eq("client_id", snapshot.clientId);
     if (error) throw error;
     return;
   }
@@ -113,24 +123,30 @@ export async function saveConversation(snapshot: ConversationSnapshot): Promise<
 function currentPeriodKey(date = new Date()) { return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`; }
 function currentDayKey(date = new Date()) { return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`; }
 
+// WhatsApp is capped per month, Gemini per day, so each counter lives under its own period key.
+const periodFor = (field: "outboundWhatsApp" | "geminiRequests", date: Date) => field === "outboundWhatsApp" ? currentPeriodKey(date) : currentDayKey(date);
+
 export async function getUsageCounts(date = new Date()): Promise<{ outboundWhatsApp: number; geminiRequests: number }> {
   if (useSupabase()) {
-    const period = currentPeriodKey(date);
-    const { data, error } = await getSupabaseServer().from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
-    if (error) throw error;
-    return { outboundWhatsApp: data?.outbound_whatsapp ?? 0, geminiRequests: data?.gemini_requests ?? 0 };
+    const supabase = getSupabaseServer();
+    const [month, day] = await Promise.all([
+      supabase.from("usage_counters").select("outbound_whatsapp").eq("period_key", periodFor("outboundWhatsApp", date)).maybeSingle(),
+      supabase.from("usage_counters").select("gemini_requests").eq("period_key", periodFor("geminiRequests", date)).maybeSingle(),
+    ]);
+    if (month.error) throw month.error;
+    if (day.error) throw day.error;
+    return { outboundWhatsApp: month.data?.outbound_whatsapp ?? 0, geminiRequests: day.data?.gemini_requests ?? 0 };
   }
   const db = await getDb();
   if (!db) return { outboundWhatsApp: 0, geminiRequests: 0 };
-  const period = currentPeriodKey(date);
-  const result = await db.select().from(usageCounters).where(eq(usageCounters.periodKey, period)).limit(1);
-  const row = result[0];
-  return { outboundWhatsApp: row?.outboundWhatsApp ?? 0, geminiRequests: row?.geminiRequests ?? 0 };
+  const [month] = await db.select().from(usageCounters).where(eq(usageCounters.periodKey, periodFor("outboundWhatsApp", date))).limit(1);
+  const [day] = await db.select().from(usageCounters).where(eq(usageCounters.periodKey, periodFor("geminiRequests", date))).limit(1);
+  return { outboundWhatsApp: month?.outboundWhatsApp ?? 0, geminiRequests: day?.geminiRequests ?? 0 };
 }
 
 export async function incrementUsage(field: "outboundWhatsApp" | "geminiRequests", date = new Date()): Promise<void> {
+  const period = periodFor(field, date);
   if (useSupabase()) {
-    const period = currentPeriodKey(date);
     const column = field === "outboundWhatsApp" ? "outbound_whatsapp" : "gemini_requests";
     const { data, error } = await getSupabaseServer().from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
     if (error) throw error;
@@ -141,7 +157,6 @@ export async function incrementUsage(field: "outboundWhatsApp" | "geminiRequests
   }
   const db = await getDb();
   if (!db) return;
-  const period = currentPeriodKey(date);
   const result = await db.select().from(usageCounters).where(eq(usageCounters.periodKey, period)).limit(1);
   const row = result[0];
   if (!row) {

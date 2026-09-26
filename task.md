@@ -8,12 +8,12 @@ Here's the updated task list with your changes applied.
 - [ ] Link your number, confirm a message round-trip.
 - [x] Handle reconnects across Render's sleep/wake cycle; detect logged-out state and alert by email.
 - [x] Deduplicate messages by ID; ignore group chats and the owner's own outgoing messages (treat as "owner took over this chat").
-- [ ] Debounce rapid consecutive client messages into one turn.
+- [x] Debounce rapid consecutive client messages into one turn (4 s quiet window per client, in `server/whatsapp/baileys.ts`).
 
 ## Phase 2 — Backend and dashboard skeleton
 
 - [x] Scaffold Node.js/TypeScript backend.
-- [x] Define Supabase tables: `projects`, `conversations`, `messages`, `settings`, `event_log`, and encrypted `baileys_auth_state`. (No `users` or `orders` tables are in the Supabase migration.)
+- [x] Define Supabase tables: `projects`, `conversations`, `messages`, `settings`, `event_log`, and encrypted `baileys_auth_state`. `orders` is added by `002_orders_and_lockdown.sql`; there is no `users` table because the dashboard has no login.
 - [x] Build the ON/OFF switch runtime path. Settings, projects, conversations, usage counters, events, and takeover state now prefer Supabase when configured; apply the hosted migration before using production data.
 - [x] Build `/health` and `/healthz` endpoints. Connect cron-job.org after Render deployment.
 - [x] Dashboard has no login — anyone with the link can open it. *(Flag: since there's no auth, treat the dashboard URL itself as the secret — don't share or index it, and know that anyone with the link can flip the switch or edit the knowledge base.)*
@@ -31,8 +31,8 @@ Here's the updated task list with your changes applied.
 ## Phase 4 — Lead qualification (from your notes)
 
 - [x] Define a small set of qualifying questions per project (budget, timeline, business type, what they actually need) — asked naturally, not as a form.
-- [ ] Build an intent/fit score in the AI's structured output (e.g. high/medium/low) based on how the client answers — so low-fit "just browsing" chats don't consume your attention the same way as serious ones.
-- [ ] Surface this score on the Conversations list so you can see at a glance which chats are worth jumping into first.
+- [x] Build an intent/fit score in the AI's structured output (e.g. high/medium/low) based on how the client answers — so low-fit "just browsing" chats don't consume your attention the same way as serious ones.
+- [x] Surface this score on the Conversations list so you can see at a glance which chats are worth jumping into first.
 - [ ] Make the first response instant (this is already true by design — Baileys replies the moment a message arrives, no queue).
 
 ## Phase 5 — Project (knowledge base) management
@@ -45,9 +45,9 @@ Here's the updated task list with your changes applied.
 
 ## Phase 6 — Insights (knowledge base growth loop)
 
-- [ ] Log every message with tags (topic, intent score, handed over or not).
+- [x] Log every message with tags (topic, intent score, handed over or not) in the Supabase `messages` table.
 - [x] Build on-demand analysis: common questions, questions that triggered handover, common objections, where chats stall.
-- [ ] Build "Add to knowledge base" / "Dismiss" actions so gaps you spot get folded back into the trained project — this is how the bot's answers get more exact over time, per your note.
+- [x] Build "Approve" / "Dismiss" actions on Insights. Approving marks the suggestion; apply it by editing the project training (suggestions are advice, not facts, so they are never injected into the bot automatically).
 
 ## Phase 7 — Guardrails (keeps you at $0)
 

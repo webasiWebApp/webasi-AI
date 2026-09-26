@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, ne } from "drizzle-orm";
 import { getDb } from "./db";
 import { getSupabaseServer } from "./_core/supabase";
 import { ENV } from "./_core/env";
@@ -8,7 +8,7 @@ import { canActivateProject, formatAutomationAudit, trainingReadiness } from "..
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 const mapProject = (row: any) => row ? { ...row, projectKey: row.project_key, readiness: row.readiness ?? 0, snapshot: typeof row.snapshot === "string" ? row.snapshot : JSON.stringify(row.snapshot ?? {}), createdAt: row.created_at, updatedAt: row.updated_at } : null;
-const mapConversation = (row: any) => ({ ...row, clientId: row.client_id, waId: row.wa_id, profileName: row.profile_name, isPaused: Boolean(row.is_paused), missingFields: row.missing_fields ?? [], extractedFields: row.extracted_fields ?? {}, recentMessages: JSON.stringify(row.recent_messages ?? []), lastClientMessageAt: row.last_client_message_at, createdAt: row.created_at, updatedAt: row.updated_at });
+const mapConversation = (row: any) => ({ ...row, clientId: row.client_id, waId: row.wa_id, profileName: row.profile_name, isPaused: Boolean(row.is_paused), missingFields: row.missing_fields ?? [], extractedFields: row.extracted_fields ?? {}, recentMessages: JSON.stringify(row.recent_messages ?? []), lastClientMessageAt: row.last_client_message_at, intentScore: row.intent_score as "high" | "medium" | "low" | null, handedOver: Boolean(row.handed_over), createdAt: row.created_at, updatedAt: row.updated_at });
 const mapEvent = (row: any) => ({ ...row, eventType: row.event_type, clientId: row.client_id, createdAt: row.created_at });
 
 export async function ensureDefaults() {
@@ -78,28 +78,38 @@ export async function updateSettings(input: { businessName?: string; bankDetails
   return true;
 }
 
-export async function createOrder(input: { orderKey: string; clientId: string; waId: string; packageName: string; depositAmount: number; slipMediaId?: string; state?: "awaiting_deposit" | "slip_received" | "confirmed_by_owner"; notes?: string }) { const db = await getDb(); if (!db) return null; await db.insert(orders).values({ ...input, slipMediaId: input.slipMediaId ?? null, state: input.state ?? "awaiting_deposit", notes: input.notes ?? "" }); return true; }
-export async function listOrders() { const db = await getDb(); if (!db) return []; return db.select().from(orders).orderBy(desc(orders.updatedAt)); }
-export async function confirmOrder(orderKey: string) { const db = await getDb(); if (!db) return false; await db.update(orders).set({ state: "confirmed_by_owner", updatedAt: new Date() }).where(eq(orders.orderKey, orderKey)); return true; }
+const mapOrder = (row: any) => ({ ...row, orderKey: row.order_key, clientId: row.client_id, waId: row.wa_id, packageName: row.package_name, depositAmount: row.deposit_amount, slipMediaId: row.slip_media_id, createdAt: row.created_at, updatedAt: row.updated_at });
+export async function createOrder(input: { orderKey: string; clientId: string; waId: string; packageName: string; depositAmount: number; slipMediaId?: string; state?: "awaiting_deposit" | "slip_received" | "confirmed_by_owner"; notes?: string }) { if (useSupabase()) { const { error } = await getSupabaseServer().from("orders").upsert({ order_key: input.orderKey, client_id: input.clientId, wa_id: input.waId, package_name: input.packageName, deposit_amount: input.depositAmount, slip_media_id: input.slipMediaId ?? null, state: input.state ?? "awaiting_deposit", notes: input.notes ?? "", updated_at: new Date().toISOString() }, { onConflict: "order_key" }); if (error) throw error; return true; } const db = await getDb(); if (!db) return null; await db.insert(orders).values({ ...input, slipMediaId: input.slipMediaId ?? null, state: input.state ?? "awaiting_deposit", notes: input.notes ?? "" }); return true; }
+export async function markOrderSlipReceived(waId: string, slipMediaId?: string) { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("orders").update({ state: "slip_received", slip_media_id: slipMediaId ?? null, notes: "Payment slip received; owner verification required.", updated_at: new Date().toISOString() }).eq("wa_id", waId).eq("state", "awaiting_deposit").select("id"); if (error) throw error; return (data ?? []).length > 0; } const db = await getDb(); if (!db) return false; const rows = await db.select().from(orders).where(and(eq(orders.waId, waId), eq(orders.state, "awaiting_deposit"))).limit(1); if (!rows[0]) return false; await db.update(orders).set({ state: "slip_received", slipMediaId: slipMediaId ?? null, notes: "Payment slip received; owner verification required.", updatedAt: new Date() }).where(eq(orders.id, rows[0].id)); return true; }
+export async function listOrders() { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("orders").select("*").order("updated_at", { ascending: false }); if (error) throw error; return (data ?? []).map(mapOrder); } const db = await getDb(); if (!db) return []; return db.select().from(orders).orderBy(desc(orders.updatedAt)); }
+export async function confirmOrder(orderKey: string) { if (useSupabase()) { const { error } = await getSupabaseServer().from("orders").update({ state: "confirmed_by_owner", updated_at: new Date().toISOString() }).eq("order_key", orderKey); if (error) throw error; return true; } const db = await getDb(); if (!db) return false; await db.update(orders).set({ state: "confirmed_by_owner", updatedAt: new Date() }).where(eq(orders.orderKey, orderKey)); return true; }
 
 export async function recordEvent(input: { eventType: string; severity?: "info" | "warning" | "error"; title: string; detail: string; clientId?: string }) { if (useSupabase()) { const { error } = await getSupabaseServer().from("event_log").insert({ event_type: input.eventType, severity: input.severity ?? "info", title: input.title, detail: input.detail, client_id: input.clientId ?? null }); if (error) throw error; return; } const db = await getDb(); if (!db) return; await db.insert(eventLogs).values({ ...input, severity: input.severity ?? "info", clientId: input.clientId ?? null }); }
 export async function listEvents() { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("event_log").select("*").order("created_at", { ascending: false }).limit(50); if (error) throw error; return (data ?? []).map(mapEvent); } const db = await getDb(); if (!db) return []; return db.select().from(eventLogs).orderBy(desc(eventLogs.createdAt)).limit(50); }
-export async function listInsights() { const db = await getDb(); if (!db) return []; return db.select().from(insights).orderBy(desc(insights.createdAt)); }
-export async function approveInsight(id: number) { const db = await getDb(); if (!db) return false; await db.update(insights).set({ status: "approved" }).where(eq(insights.id, id)); return true; }
+const mapInsight = (row: any) => ({ ...row, createdAt: row.created_at });
+export async function listInsights() { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("insights").select("*").neq("status", "dismissed").order("created_at", { ascending: false }); if (error) throw error; return (data ?? []).map(mapInsight); } const db = await getDb(); if (!db) return []; return db.select().from(insights).where(ne(insights.status, "dismissed")).orderBy(desc(insights.createdAt)); }
+export async function setInsightStatus(id: string | number, status: "approved" | "dismissed") { if (useSupabase()) { const { error } = await getSupabaseServer().from("insights").update({ status }).eq("id", id); if (error) throw error; return true; } const db = await getDb(); if (!db) return false; await db.update(insights).set({ status }).where(eq(insights.id, Number(id))); return true; }
 export async function analyzeInsights() {
-  const db = await getDb(); if (!db) return [];
-  const rows = await db.select().from(conversations).limit(50);
+  const rows = await listConversations();
   const messages = rows.flatMap((row) => { try { return JSON.parse(row.recentMessages) as Array<{ role?: string; text?: string }>; } catch { return []; } });
-  const clientText = messages.filter((message) => message.role !== "assistant").map((message) => message.text ?? "").join(" ").toLowerCase();
-  const questionCount = messages.filter((message) => (message.text ?? "").includes("?")).length;
+  const clientText = messages.filter((message) => message.role === "client").map((message) => message.text ?? "").join(" ").toLowerCase();
   const priceMentions = (clientText.match(/price|cost|budget|expensive|discount|cheap/g) ?? []).length;
   const singlishMentions = (clientText.match(/mata|one|puluwan|kiyada|hari|eka|ganna/g) ?? []).length;
   const dropoffStates = rows.filter((row) => ["collecting", "awaiting_deposit", "needs_owner"].includes(row.state));
+  const handovers = rows.filter((row) => row.state === "needs_owner" || ("handedOver" in row && row.handedOver));
   const generated = [
     priceMentions > 0 ? { title: "Price and budget questions recur in client chats", detail: `${priceMentions} price-related mentions were found across the latest ${rows.length} conversations. Review the package FAQ and objection handling before adding anything to project knowledge.`, category: "Objection", status: "suggested" as const } : null,
     singlishMentions > 0 ? { title: "Clients frequently use English and Singlish together", detail: `${singlishMentions} Singlish markers were found in recent client messages. Keep mirroring the client’s language style and review the tone guidance.`, category: "Language", status: "suggested" as const } : null,
     dropoffStates.length > 0 ? { title: "Conversations are dropping off before confirmation", detail: `${dropoffStates.length} conversations remain in collecting, awaiting deposit, or needs owner states. Review the next-step prompts and escalation rules.`, category: "Drop-off", status: "suggested" as const } : null,
+    handovers.length > 0 ? { title: "Questions are being handed over to you", detail: `${handovers.length} conversations were escalated because WEBASI could not answer from the project facts. Open them in Conversations and add the missing answers to the project's training.`, category: "Handover", status: "suggested" as const } : null,
   ].filter((item): item is { title: string; detail: string; category: string; status: "suggested" } => Boolean(item));
+  if (useSupabase()) {
+    const supabase = getSupabaseServer();
+    const { error } = await supabase.from("insights").delete().eq("status", "suggested"); if (error) throw error;
+    if (generated.length > 0) { const { error: insertError } = await supabase.from("insights").insert(generated); if (insertError) throw insertError; }
+    return listInsights();
+  }
+  const db = await getDb(); if (!db) return [];
   await db.delete(insights).where(eq(insights.status, "suggested"));
   if (generated.length > 0) await db.insert(insights).values(generated);
   return listInsights();

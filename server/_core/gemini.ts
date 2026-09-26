@@ -104,7 +104,7 @@ export async function invokeGemini(input: InvokeParams): Promise<InvokeResult> {
     throw new Error(body?.error?.message ?? `Gemini request failed with status ${response?.status}`);
   }
   
-  const content = body.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
+  const content = body?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("\n") ?? "";
   if (!content) throw new Error("Gemini returned an empty response");
   return { id: `gemini-${Date.now()}`, created: Math.floor(Date.now() / 1000), model: selectedModel, choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }] };
 }

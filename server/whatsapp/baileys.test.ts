@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { baileysStatusCode, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
+import { describe, expect, it, vi } from "vitest";
+import { baileysStatusCode, createDebouncer, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -27,5 +27,32 @@ describe("Baileys transport safety helpers", () => {
   it("extracts status codes from Baileys error shapes", () => {
     expect(baileysStatusCode({ output: { statusCode: 401 } })).toBe(401);
     expect(baileysStatusCode({ statusCode: 403 })).toBe(403);
+  });
+});
+
+describe("Inbound text debouncer", () => {
+  it("flushes a burst of messages once, after the key goes quiet", () => {
+    vi.useFakeTimers();
+    const flushed: Array<[string, string[]]> = [];
+    const debouncer = createDebouncer<string>((key, items) => flushed.push([key, items]), 1000);
+    debouncer.push("a", "hi");
+    vi.advanceTimersByTime(600);
+    debouncer.push("a", "price?");
+    debouncer.push("b", "hello");
+    vi.advanceTimersByTime(999);
+    expect(flushed).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(flushed).toEqual([["a", ["hi", "price?"]], ["b", ["hello"]]]);
+    vi.useRealTimers();
+  });
+  it("take() returns pending items immediately and cancels the timer", () => {
+    vi.useFakeTimers();
+    const onFlush = vi.fn();
+    const debouncer = createDebouncer<string>(onFlush, 1000);
+    debouncer.push("a", "hi");
+    expect(debouncer.take("a")).toEqual(["hi"]);
+    vi.advanceTimersByTime(2000);
+    expect(onFlush).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });

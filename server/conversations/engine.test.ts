@@ -91,7 +91,7 @@ describe("WEBASI grounded conversation engine", () => {
     const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: '{"reply":"This response is unfinished' } }] });
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });
 
-    expect(result.reply).toContain("rephrase");
+    expect(result.reply).toContain("owner");
     expect(result.needsOwner).toBe(true);
   });
 });

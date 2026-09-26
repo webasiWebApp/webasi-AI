@@ -5,8 +5,8 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
-import { getUsageCounts, incrementUsage } from "./db";
-import { analyzeInsights, approveInsight, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
+import { getUsageCounts, incrementUsage, logMessage } from "./db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { approvedRestaurantProject } from "./conversations/project";
 import { createConversationEngine } from "./conversations/engine";
@@ -56,6 +56,7 @@ export const appRouter = router({
       if (!result.accepted) return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" };
       await incrementUsage("outboundWhatsApp");
       await recordOwnerMessageByWaId(conversation.waId, input.text);
+      await logMessage({ messageId: result.messageId ?? `owner-${Date.now()}`, clientId: input.clientId, waId: conversation.waId, role: "owner", body: input.text }).catch((error) => console.error("[Dashboard] message log failed", error));
       await recordEvent({ eventType: "dashboard_owner_message", severity: "info", title: "Owner message sent", detail: `Owner sent a dashboard message to ${conversation.profileName ?? conversation.waId}.`, clientId: input.clientId });
       return { accepted: true, messageId: result.messageId };
     }),
@@ -81,7 +82,7 @@ export const appRouter = router({
     reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
-  insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.number().int() })).mutation(({ input }) => approveInsight(input.id)), }),
+  insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "approved")), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
 });
 
 export type AppRouter = typeof appRouter;
