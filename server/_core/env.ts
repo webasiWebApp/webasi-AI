@@ -1,6 +1,5 @@
 export const ENV = {
   cookieSecret: process.env.JWT_SECRET ?? "",
-  dashboardPassword: process.env.DASHBOARD_PASSWORD ?? "",
   databaseUrl: process.env.DATABASE_URL ?? "",
   supabaseUrl: process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "",
   supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",

@@ -1,10 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { COOKIE_NAME } from "@shared/const";
-import { getSessionCookieOptions } from "./_core/cookies";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
-import { allowLoginAttempt, createSessionToken, passwordMatches, SESSION_TTL_MS } from "./_core/auth";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
 import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
@@ -14,17 +11,6 @@ import { createConversationEngine } from "./conversations/engine";
 import { parseProjectSnapshot } from "../shared/webasi";
 
 export const appRouter = router({
-  auth: router({
-    me: publicProcedure.query(({ ctx }) => ({ authenticated: ctx.isOwner, configured: Boolean(ENV.dashboardPassword) })),
-    login: publicProcedure.input(z.object({ password: z.string().min(1).max(200) })).mutation(({ ctx, input }) => {
-      if (!ENV.dashboardPassword) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Set DASHBOARD_PASSWORD on the server to enable the dashboard." });
-      if (!allowLoginAttempt(ctx.req.ip ?? "unknown")) throw new TRPCError({ code: "TOO_MANY_REQUESTS", message: "Too many attempts. Try again in 15 minutes." });
-      if (!passwordMatches(input.password)) throw new TRPCError({ code: "UNAUTHORIZED", message: "Wrong password." });
-      ctx.res.cookie(COOKIE_NAME, createSessionToken(), { ...getSessionCookieOptions(ctx.req), maxAge: SESSION_TTL_MS });
-      return { success: true } as const;
-    }),
-    logout: publicProcedure.mutation(({ ctx }) => { ctx.res.clearCookie(COOKIE_NAME, getSessionCookieOptions(ctx.req)); return { success: true } as const; }),
-  }),
   dashboard: router({
     overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversations(), listOrders(), listEvents()]); return { settings, activeProject, usage, conversations, orders, events }; }),
     conversations: protectedProcedure.query(() => listConversations()),

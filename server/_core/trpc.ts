@@ -1,5 +1,4 @@
-import { UNAUTHED_ERR_MSG } from "@shared/const";
-import { initTRPC, TRPCError } from "@trpc/server";
+import { initTRPC } from "@trpc/server";
 import superjson from "superjson";
 import type { TrpcContext } from "./context";
 
@@ -10,8 +9,6 @@ const t = initTRPC.context<TrpcContext>().create({
 export const router = t.router;
 export const publicProcedure = t.procedure;
 
-// Every dashboard procedure requires the owner session cookie (see ./auth).
-export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
-  if (!ctx.isOwner) throw new TRPCError({ code: "UNAUTHORIZED", message: UNAUTHED_ERR_MSG });
-  return next();
-});
+// No login by owner's choice: the dashboard URL itself is the secret. Keep the name so
+// procedures that must be owner-only are easy to find if a login is added later.
+export const protectedProcedure = t.procedure;

@@ -4,7 +4,7 @@ Here's the updated task list with your changes applied.
 
 - [x] Set up Supabase project (free tier) — run migrations `001` to `004` from `supabase/migrations/` in order, and set `SUPABASE_SERVICE_ROLE_KEY` in Render.
 - [x] Build the Baileys auth state store backed by Supabase. Credentials are encrypted before storage in `baileys_auth_state`.
-- [x] Build the "Connect WhatsApp" pairing page (QR code), behind the dashboard password.
+- [x] Build the "Connect WhatsApp" pairing page (QR code) — no login needed.
 - [ ] **(owner)** Link your number, confirm a message round-trip.
 - [x] Handle reconnects across Render's sleep/wake cycle; detect logged-out state and alert by email.
 - [x] Deduplicate messages by ID; ignore group chats and the owner's own outgoing messages (treat as "owner took over this chat").
@@ -16,7 +16,7 @@ Here's the updated task list with your changes applied.
 - [x] Define Supabase tables: `projects`, `conversations`, `messages`, `settings`, `event_log`, and encrypted `baileys_auth_state`. `orders` is added by `002_orders_and_lockdown.sql`; there is no `users` table because the dashboard has no login.
 - [x] Build the ON/OFF switch runtime path. Settings, projects, conversations, usage counters, events, and takeover state now prefer Supabase when configured; apply the hosted migration before using production data.
 - [x] Build `/health` and `/healthz` endpoints. Connect cron-job.org after Render deployment.
-- [x] Dashboard is protected by a single owner password (`DASHBOARD_PASSWORD`): signed 30-day session cookie, login attempts rate-limited, `/health` exposes no QR code or phone number.
+- [x] Dashboard has no login by choice — anyone with the link can open it, so treat the dashboard URL as the secret (don't share or index it). `/health` exposes no QR code or phone number.
 
 ## Phase 3 — AI conversation engine
 
