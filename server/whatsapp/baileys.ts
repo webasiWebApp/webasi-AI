@@ -1,4 +1,4 @@
-import { DisconnectReason, Browsers, jidNormalizedUser, makeWASocket, type WAMessage, type WAMessageKey } from "baileys";
+import { DisconnectReason, Browsers, jidNormalizedUser, makeWASocket, normalizeMessageContent, type WAMessage, type WAMessageKey } from "baileys";
 import pino from "pino";
 import { createDatabaseAuthState, saveBaileysCreds, hasBaileysSession, clearBaileysSession } from "./baileys-auth";
 import { ENV } from "../_core/env";
@@ -13,6 +13,8 @@ export type BaileysSendResult = { accepted: boolean; messageId?: string; reason?
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export function normalizeBaileysPhone(phoneNumber: string) { return phoneNumber.replace(/\D/g, ""); }
+// Phone-number chats are stored as the bare number; privacy-ID chats ("…@lid") keep the full JID so replies reach them.
+export function waIdFromJid(jid: string) { return jid.endsWith("@s.whatsapp.net") ? jid.split("@")[0] : jid; }
 export function shouldIgnoreBaileysMessage(remoteJid: string, fromMe: boolean) { return fromMe || !remoteJid || remoteJid.endsWith("@g.us") || remoteJid === "status@broadcast"; }
 export function canSendBaileysMessage(times: number[], now = Date.now(), maxPerMinute = ENV.baileysRateLimitPerMinute, minIntervalMs = 2500) { const recent = times.filter((time) => now - time < 60000); const last = recent.at(-1); return recent.length < maxPerMinute && (!last || now - last >= minIntervalMs); }
 export function startupFailureStatus(error: unknown): Pick<BaileysStatus, "status" | "lastError"> { return { status: "reconnect_required", lastError: error instanceof Error ? error.message : "baileys_startup_failed" }; }
@@ -145,18 +147,20 @@ class BaileysTransport {
   private async handleInbound(message: WAMessage) {
     try {
       const remoteJid = message.key.remoteJid ?? "";
-      const waId = remoteJid.split("@")[0];
+      const waId = waIdFromJid(remoteJid);
       if (message.key.id && this.sentIds.has(message.key.id)) return; // our own reply echoing back
-      if (waId && waId === this.phoneNumber) return; // owner's "message yourself" chat, used for alerts
+      if (this.isOwnChat(remoteJid)) return; // owner's "message yourself" chat, used for alerts
       if (shouldIgnoreBaileysMessage(remoteJid, Boolean(message.key.fromMe))) {
         if (message.key.fromMe && remoteJid && !remoteJid.endsWith("@g.us") && remoteJid !== "status@broadcast") {
-          const ownerText = message.message?.conversation ?? message.message?.extendedTextMessage?.text ?? "";
+          const echo = normalizeMessageContent(message.message);
+          const ownerText = echo?.conversation ?? echo?.extendedTextMessage?.text ?? "";
           await pauseConversationByWaId(waId);
           if (ownerText) { await captureLearnedAnswer(waId, ownerText); await recordOwnerMessageByWaId(waId, ownerText); }
         }
         return;
       }
-      const content = message.message;
+      // Unwraps disappearing, view-once and edited-message envelopes.
+      const content = normalizeMessageContent(message.message);
       if (!content) return;
       if (message.key) this.lastInboundKey.set(remoteJid, message.key);
       const image = content.imageMessage;
@@ -187,6 +191,13 @@ class BaileysTransport {
     while (!this.qr && Date.now() < deadline && this.status !== "reconnect_required") await sleep(250);
     if (!this.qr) throw new Error(this.lastError ?? "QR code is not ready yet; try again in a moment");
     return this.qr;
+  }
+
+  private isOwnChat(remoteJid: string) {
+    const user = this.socket?.user;
+    if (!user) return false;
+    const own = [user.id, (user as { lid?: string }).lid].filter(Boolean).map((jid) => jidNormalizedUser(jid));
+    return own.includes(jidNormalizedUser(remoteJid));
   }
 
   // Alerts go to the owner's own "message yourself" chat on the linked number.

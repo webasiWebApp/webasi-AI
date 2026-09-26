@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { baileysStatusCode, createDebouncer, splitIntoBubbles, typingDelayMs, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
+import { baileysStatusCode, createDebouncer, waIdFromJid, splitIntoBubbles, typingDelayMs, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -66,5 +66,12 @@ describe("human-like sending", () => {
     expect(typingDelayMs("ok")).toBe(1500);
     expect(typingDelayMs("x".repeat(100))).toBe(4500);
     expect(typingDelayMs("x".repeat(1000))).toBe(7000);
+  });
+});
+
+describe("chat addressing", () => {
+  it("keeps privacy-ID chats as full JIDs so replies reach them", () => {
+    expect(waIdFromJid("94771234567@s.whatsapp.net")).toBe("94771234567");
+    expect(waIdFromJid("13413585571971@lid")).toBe("13413585571971@lid");
   });
 });
