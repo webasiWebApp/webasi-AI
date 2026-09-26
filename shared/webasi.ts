@@ -115,3 +115,13 @@ export function csvCell(value: unknown): string {
   const text = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
   return `"${text.replace(/"/g, '""')}"`;
 }
+
+// Reads a rupee amount the way owners type it: "LKR 20 000", "20,000 LKR", "Rs.20000", "රු. 20000", "20k".
+export function parsePriceLkr(text: string): number {
+  const amount = String.raw`(\d{1,3}(?:[ ,.]\d{3})+|\d+(?:\.\d+)?\s*k\b|\d+)`;
+  const currency = String.raw`(?:lkr|rs\.?|rupees?|රු\.?|/-)`;
+  const match = text.match(new RegExp(`${currency}\\s*${amount}`, "i")) ?? text.match(new RegExp(`${amount}\\s*${currency}`, "i"));
+  if (!match) return 0;
+  const raw = match[1].toLowerCase().replace(/\s+/g, "");
+  return raw.endsWith("k") ? Math.round(Number(raw.slice(0, -1)) * 1000) : Number(raw.replace(/[ ,.]/g, ""));
+}

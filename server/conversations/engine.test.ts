@@ -115,3 +115,20 @@ describe("knowledge-grounded validation", () => {
     expect(result).toMatchObject({ intentScore: "high", sentiment: "positive", objection: "price", language: "singlish", clientNotes: "Runs a cafe in Kandy" });
   });
 });
+
+describe("model output tolerance", () => {
+  it("uses the answer even when the model renames the reply key or returns notes as a list", async () => {
+    const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ replyMessage: "Portfolio website eke price LKR 85,000.", intentScore: "high", language: "Sinhala", clientNotes: ["Wants a portfolio site", "Asked price"] }) } }] });
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Price kohomd" });
+    expect(result.reply).toBe("Portfolio website eke price LKR 85,000.");
+    expect(result.needsOwner).toBe(false);
+    expect(result.language).toBe("sinhala");
+    expect(result.clientNotes).toBe("Wants a portfolio site\nAsked price");
+  });
+
+  it("tells the model the exact output keys, whatever the provider", async () => {
+    const callModel = vi.fn().mockResolvedValue(modelReply("Hi!"));
+    await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });
+    expect(callModel.mock.calls[0]?.[0]?.messages[0].content).toContain('{"reply": "<the WhatsApp message to send>"');
+  });
+});

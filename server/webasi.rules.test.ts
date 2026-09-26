@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canActivateProject, nextOrderState, shouldSendReply, trainingReadiness, usagePercent } from "../shared/webasi";
+import { canActivateProject, nextOrderState, parsePriceLkr, shouldSendReply, trainingReadiness, usagePercent } from "../shared/webasi";
 
 describe("WEBASI safety rules", () => {
   it("clamps usage percentages to a safe 0–100 range", () => {
@@ -34,5 +34,16 @@ describe("WEBASI safety rules", () => {
     expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000" }, "Summary").complete).toBe(false);
     expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000", timeline: "14–18 days" }, "").complete).toBe(false);
     expect(trainingReadiness(["pricing", "timeline"], { pricing: "LKR 85,000", timeline: "14–18 days" }, "Approved package summary")).toMatchObject({ readiness: 100, complete: true });
+  });
+});
+
+describe("owner-typed prices", () => {
+  it("reads the price however the owner wrote it", () => {
+    expect(parsePriceLkr("Starting from LKR 20 000 with hosting and domain")).toBe(20000);
+    expect(parsePriceLkr("20,000 LKR including domain")).toBe(20000);
+    expect(parsePriceLkr("Rs.85000")).toBe(85000);
+    expect(parsePriceLkr("රු. 45,000")).toBe(45000);
+    expect(parsePriceLkr("around 20k rupees")).toBe(20000);
+    expect(parsePriceLkr("price depends on pages")).toBe(0);
   });
 });

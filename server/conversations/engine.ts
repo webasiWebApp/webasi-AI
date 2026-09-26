@@ -87,7 +87,7 @@ export function projectFacts(project: ApprovedProjectSnapshot) {
     `Package: ${project.packageName} — ${project.packageDescription}`,
     `Included: ${(project.included || []).join(", ")}`,
     `Not included: ${(project.excluded || []).join(", ")}`,
-    `Price: LKR ${(project.priceLkr || 0).toLocaleString("en-LK")}`,
+    project.priceLkr > 0 ? `Price: LKR ${project.priceLkr.toLocaleString("en-LK")}` : "Price: see the package description",
     `Deposit: ${project.depositPercent || 0}%`,
     `Timeline: ${project.timelineBusinessDays || "Not specified"}`,
     `Revisions: ${project.revisionPolicy || "Not specified"}`,
@@ -103,6 +103,7 @@ function contentToText(content: string | Array<{ type: string; text?: string }>)
   return typeof content === "string" ? content : content.map((part) => part.type === "text" ? part.text ?? "" : "").join("\n");
 }
 
+const firstString = (...values: unknown[]) => (values.find((value) => typeof value === "string" && value.trim()) as string | undefined) ?? "";
 const pick = <T extends string>(allowed: readonly T[], value: unknown): T | null => allowed.includes(value as T) ? value as T : null;
 
 function parseStructured(content: string | Array<{ type: string; text?: string }>): StructuredReply {
@@ -118,7 +119,7 @@ function parseStructured(content: string | Array<{ type: string; text?: string }
   }
 
   const result: StructuredReply = {
-    reply: typeof parsed.reply === "string" ? parsed.reply.trim() : "",
+    reply: firstString(parsed.reply, parsed.replyMessage, parsed.responseMessage, parsed.response, parsed.message, parsed.text).trim(),
     extractedFields: typeof parsed.extractedFields === "object" && parsed.extractedFields ? parsed.extractedFields : {},
     intent: pick(INTENTS, parsed.intent) ?? "unknown",
     needsOwner: Boolean(parsed.needsOwner),
@@ -127,8 +128,8 @@ function parseStructured(content: string | Array<{ type: string; text?: string }
     intentScore: pick(INTENT_SCORES, parsed.intentScore),
     sentiment: pick(SENTIMENTS, parsed.sentiment),
     objection: pick(OBJECTIONS, parsed.objection),
-    language: pick(LANGUAGES, parsed.language),
-    clientNotes: typeof parsed.clientNotes === "string" ? parsed.clientNotes.slice(0, 1000) : null,
+    language: pick(LANGUAGES, typeof parsed.language === "string" ? parsed.language.toLowerCase() : null),
+    clientNotes: (Array.isArray(parsed.clientNotes) ? parsed.clientNotes.join("\n") : typeof parsed.clientNotes === "string" ? parsed.clientNotes : "").slice(0, 1000) || null,
   };
 
   if (!result.reply) {
@@ -206,7 +207,10 @@ READING THE CLIENT (fill these every turn):
 - extractedFields: any of these fields the client has now given: clientName, contactDetails, businessName, businessDescription, chosenPackage, budget, deadline, existingAssets.
 
 APPROVED PROJECT FACTS:
-${projectFacts(project)}`;
+${projectFacts(project)}
+
+OUTPUT: reply with one JSON object using exactly these keys and no others:
+{"reply": "<the WhatsApp message to send>", "extractedFields": {}, "intent": "${INTENTS.join("|")}", "needsOwner": false, "needsOwnerReason": null, "reliedOnFacts": [], "intentScore": "${INTENT_SCORES.join("|")}", "sentiment": "${SENTIMENTS.join("|")}", "objection": "${OBJECTIONS.join("|")}", "language": "${LANGUAGES.join("|")}", "clientNotes": "<short text>"}`;
 }
 
 type Provider = "gemini" | "groq";

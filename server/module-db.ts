@@ -4,7 +4,7 @@ import { getSupabaseServer } from "./_core/supabase";
 import { ENV } from "./_core/env";
 import { conversations, eventLogs, insights, orders, projects, settings, trainingSessions } from "../drizzle/schema";
 import { approvedRestaurantProject } from "./conversations/project";
-import { canActivateProject, formatAutomationAudit, trainingReadiness } from "../shared/webasi";
+import { canActivateProject, formatAutomationAudit, parsePriceLkr, trainingReadiness } from "../shared/webasi";
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 const mapProject = (row: any) => row ? { ...row, projectKey: row.project_key, readiness: row.readiness ?? 0, snapshot: typeof row.snapshot === "string" ? row.snapshot : JSON.stringify(row.snapshot ?? {}), createdAt: row.created_at, updatedAt: row.updated_at } : null;
@@ -201,10 +201,9 @@ export async function compileProjectSnapshot(projectKey: string) {
   const answers = training.answers;
   const answer = (key: string) => answers[key]?.trim() ?? "";
   
-  const priceMatch = answer("pricing").match(/(?:lkr|rs\.?|rupees?)\s*([\d,]+)/i);
   const depositMatch = answer("depositRule").match(/(\d{1,3})\s*%/);
   
-  const priceLkr = parsedSnapshot?.priceLkr ?? (priceMatch ? Number(priceMatch[1].replace(/,/g, "")) : 0);
+  const priceLkr = parsedSnapshot?.priceLkr || parsePriceLkr(answer("pricing")) || parsePriceLkr(answer("packageDescription"));
   const depositPercent = parsedSnapshot?.depositPercent ?? (depositMatch ? Number(depositMatch[1]) : 0);
   const timeline = parsedSnapshot?.timelineBusinessDays ?? (answer("timeline") || "Not specified");
   
