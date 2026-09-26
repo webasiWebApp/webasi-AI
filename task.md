@@ -2,7 +2,7 @@ Here's the updated task list with your changes applied.
 
 ## Phase 1 — WhatsApp connection (Baileys)
 
-- [x] Set up Supabase project (free tier) — run migrations `001`, `002` and `003` from `supabase/migrations/` in order, and set `SUPABASE_SERVICE_ROLE_KEY` in Render.
+- [x] Set up Supabase project (free tier) — run migrations `001` to `004` from `supabase/migrations/` in order, and set `SUPABASE_SERVICE_ROLE_KEY` in Render.
 - [x] Build the Baileys auth state store backed by Supabase. Credentials are encrypted before storage in `baileys_auth_state`.
 - [x] Build the "Connect WhatsApp" pairing page (QR code), behind the dashboard password.
 - [ ] **(owner)** Link your number, confirm a message round-trip.
@@ -70,3 +70,8 @@ Here's the updated task list with your changes applied.
 - [x] Frustrated clients are handed to the owner automatically; a lead turning hot alerts the owner once.
 - [x] Knowledge base growth: when the owner answers a handed-over question (from the dashboard or the phone), it becomes a "Learned answer" on Insights; editing and approving it appends it to the active project's FAQs, which the bot uses immediately. FAQ and escalation-rule training answers now reach the bot.
 - [x] Prices, percentages and timelines in approved FAQs (and the computed deposit) pass the grounding check; invented numbers are still blocked.
+
+## Phase 10 — Follow-ups and weekly summary
+
+- [x] Follow-ups: one friendly nudge when a client goes quiet after WEBASI's last message — 6–23 h after their last message (inside WhatsApp's 24 h window), 9am–8pm Sri Lanka time, only while collecting details or awaiting the deposit, never for low-fit leads, paused or handed-over chats. Written by the AI in the client's language and grounding-checked, with a fixed fallback. Drafts only in shadow mode. Switch in Settings.
+- [x] Weekly summary: every Monday 9am to the owner's WhatsApp — chats, hot leads, handovers, orders and confirmed deposits, slips to verify, top objections, follow-ups sent, knowledge added, learned answers waiting, WhatsApp usage. Preview and "Send now" on Insights. Switch in Settings.

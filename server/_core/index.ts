@@ -8,6 +8,7 @@ import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
 import { registerWhatsAppWebhook } from "../webhooks/whatsapp";
 import { startBaileysTransport } from "../whatsapp/baileys";
+import { startAutomation } from "../automation";
 import { ENV } from "./env";
 import { checkSupabaseConnection } from "./supabase";
 
@@ -41,6 +42,7 @@ async function startServer() {
   });
   if (ENV.whatsappTransport === "cloud") registerWhatsAppWebhook(app);
   startBaileysTransport().catch((error) => console.error("[Baileys] startup failed", error));
+  if (process.env.NODE_ENV !== "test") startAutomation();
   app.get("/api/keepalive", (_req, res) => res.status(200).json({ ok: true, service: "webasi", time: new Date().toISOString() }));
   app.get("/health", async (_req, res) => {
     const supabase = await checkSupabaseConnection();

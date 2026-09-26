@@ -8,7 +8,7 @@ import { canActivateProject, formatAutomationAudit, trainingReadiness } from "..
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 const mapProject = (row: any) => row ? { ...row, projectKey: row.project_key, readiness: row.readiness ?? 0, snapshot: typeof row.snapshot === "string" ? row.snapshot : JSON.stringify(row.snapshot ?? {}), createdAt: row.created_at, updatedAt: row.updated_at } : null;
-const mapConversation = (row: any) => ({ ...row, clientId: row.client_id, waId: row.wa_id, profileName: row.profile_name, isPaused: Boolean(row.is_paused), missingFields: row.missing_fields ?? [], extractedFields: row.extracted_fields ?? {}, recentMessages: JSON.stringify(row.recent_messages ?? []), lastClientMessageAt: row.last_client_message_at, intentScore: row.intent_score as "high" | "medium" | "low" | null, handedOver: Boolean(row.handed_over), needsOwner: Boolean(row.handed_over) || row.state === "needs_owner", sentiment: row.sentiment as string | null, objection: row.objection as string | null, language: row.language as string | null, clientNotes: (row.client_notes ?? "") as string, createdAt: row.created_at, updatedAt: row.updated_at });
+const mapConversation = (row: any) => ({ ...row, clientId: row.client_id, waId: row.wa_id, profileName: row.profile_name, isPaused: Boolean(row.is_paused), missingFields: row.missing_fields ?? [], extractedFields: row.extracted_fields ?? {}, recentMessages: JSON.stringify(row.recent_messages ?? []), lastClientMessageAt: row.last_client_message_at, intentScore: row.intent_score as "high" | "medium" | "low" | null, handedOver: Boolean(row.handed_over), needsOwner: Boolean(row.handed_over) || row.state === "needs_owner", sentiment: row.sentiment as string | null, objection: row.objection as string | null, language: row.language as string | null, clientNotes: (row.client_notes ?? "") as string, followupSentAt: row.followup_sent_at ? new Date(row.followup_sent_at) : null, createdAt: row.created_at, updatedAt: row.updated_at });
 const mapEvent = (row: any) => ({ ...row, eventType: row.event_type, clientId: row.client_id, createdAt: row.created_at });
 
 export async function ensureDefaults() {
@@ -41,8 +41,8 @@ export async function createProject(input: { projectKey: string; name: string; s
 export async function approveProject(projectKey: string) { if (useSupabase()) { const { error } = await getSupabaseServer().from("projects").update({ status: "approved", readiness: 100, updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (error) throw error; return true; } const db = await getDb(); if (!db) return false; await db.update(projects).set({ status: "approved", readiness: 100, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
 export async function activateProject(projectKey: string) { if (useSupabase()) { const supabase = getSupabaseServer(); const { data: project, error } = await supabase.from("projects").select("status, readiness").eq("project_key", projectKey).maybeSingle(); if (error) throw error; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; const deactivate = await supabase.from("projects").update({ status: "approved" }).eq("status", "active"); if (deactivate.error) throw deactivate.error; const activate = await supabase.from("projects").update({ status: "active", updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (activate.error) throw activate.error; return true; } const db = await getDb(); if (!db) return false; const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1); const project = rows[0]; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; await db.update(projects).set({ status: "approved" }).where(eq(projects.status, "active")); await db.update(projects).set({ status: "active", updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
 
-export async function getSettings() { if (useSupabase()) { await ensureDefaults(); const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single(); if (error) throw error; return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string }; } const db = await getDb(); if (!db) return { businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider }; await ensureDefaults(); const rows = await db.select().from(settings).where(eq(settings.singletonKey, "owner")).limit(1); const row = rows[0]; return { ...row, webasiEnabled: row?.webasiEnabled === 1, shadowMode: row?.shadowMode === 1, aiProvider: ENV.aiProvider }; }
-export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean }) {
+export async function getSettings() { if (useSupabase()) { await ensureDefaults(); const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single(); if (error) throw error; return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false }; } const db = await getDb(); if (!db) return { businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; await ensureDefaults(); const rows = await db.select().from(settings).where(eq(settings.singletonKey, "owner")).limit(1); const row = rows[0]; return { ...row, webasiEnabled: row?.webasiEnabled === 1, shadowMode: row?.shadowMode === 1, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; }
+export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean }) {
   await ensureDefaults();
   if (useSupabase()) {
     const supabase = getSupabaseServer();
@@ -60,6 +60,8 @@ export async function updateSettings(input: { businessName?: string; bankDetails
     if (input.geminiDailyCap !== undefined) set.gemini_daily_cap = input.geminiDailyCap;
     if (input.webasiEnabled !== undefined) set.webasi_enabled = input.webasiEnabled;
     if (input.shadowMode !== undefined) set.shadow_mode = input.shadowMode;
+    if (input.followupsEnabled !== undefined) set.followups_enabled = input.followupsEnabled;
+    if (input.weeklySummaryEnabled !== undefined) set.weekly_summary_enabled = input.weeklySummaryEnabled;
     const { error } = await supabase.from("settings").update(set).eq("singleton_key", "owner");
     if (error) throw error;
     if (input.webasiEnabled !== undefined && Boolean(current?.webasi_enabled) !== input.webasiEnabled) await recordEvent({ eventType: "automation_state_changed", severity: input.webasiEnabled ? "warning" : "info", title: input.webasiEnabled ? "Automation enabled" : "Automation disabled", detail: formatAutomationAudit({ actor: "owner", project: activeProject?.name ?? "none", previous: Boolean(current?.webasi_enabled) ? "ON" : "OFF", next: input.webasiEnabled ? "ON" : "OFF", detail: input.webasiEnabled ? (input.shadowMode ? "Replies remain drafts because shadow mode is enabled." : "Live replies are permitted while WhatsApp is connected.") : "Incoming messages remain logged without replies." }) });
@@ -71,7 +73,8 @@ export async function updateSettings(input: { businessName?: string; bankDetails
   if (input.webasiEnabled === true) { const active = await db.select().from(projects).where(eq(projects.status, "active")).limit(1); if (!active[0]) return false; }
   const activeProject = (await db.select().from(projects).where(eq(projects.status, "active")).limit(1))[0];
   const set: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(input)) if (value !== undefined) set[key] = typeof value === "boolean" ? (value ? 1 : 0) : value;
+  const { followupsEnabled: _followups, weeklySummaryEnabled: _weekly, ...mysqlInput } = input;
+  for (const [key, value] of Object.entries(mysqlInput)) if (value !== undefined) set[key] = typeof value === "boolean" ? (value ? 1 : 0) : value;
   await db.update(settings).set(set).where(eq(settings.singletonKey, "owner"));
   if (input.webasiEnabled !== undefined && Number(current?.webasiEnabled ?? 0) !== (input.webasiEnabled ? 1 : 0)) await recordEvent({ eventType: "automation_state_changed", severity: input.webasiEnabled ? "warning" : "info", title: input.webasiEnabled ? "Automation enabled" : "Automation disabled", detail: formatAutomationAudit({ actor: "owner", project: activeProject?.name ?? "none", previous: Number(current?.webasiEnabled ?? 0) === 1 ? "ON" : "OFF", next: input.webasiEnabled ? "ON" : "OFF", detail: input.webasiEnabled ? (input.shadowMode ? "Replies remain drafts because shadow mode is enabled." : "Live replies are permitted while WhatsApp is connected.") : "Incoming messages remain logged without replies." }) });
   if (input.shadowMode !== undefined && Number(current?.shadowMode ?? 0) !== (input.shadowMode ? 1 : 0)) await recordEvent({ eventType: "shadow_mode_changed", severity: "info", title: input.shadowMode ? "Shadow mode enabled" : "Shadow mode disabled", detail: formatAutomationAudit({ actor: "owner", project: activeProject?.name ?? "none", previous: Number(current?.shadowMode ?? 0) === 1 ? "SHADOW" : "NORMAL", next: input.shadowMode ? "SHADOW" : "NORMAL", detail: input.shadowMode ? "WEBASI will draft replies for review without sending them to clients." : "WEBASI returned to its normal sending policy when enabled." }) });
@@ -263,4 +266,70 @@ export async function setAiProvider(provider: "gemini" | "groq") {
   else ENV.aiProvider = provider; // ponytail: MySQL schema has no column for this; resets on restart there
   await recordEvent({ eventType: "ai_provider_changed", severity: "info", title: "AI provider changed", detail: `Replies now use ${provider}.` });
   return { success: true, provider };
+}
+
+// text = null marks the silence as handled without adding to the transcript (shadow-mode drafts).
+export async function recordFollowUp(clientId: string, text: string | null, sentAt = new Date()) {
+  if (!useSupabase()) return false; // ponytail: follow-ups need the Supabase columns from migration 004
+  const supabase = getSupabaseServer();
+  const set: Record<string, unknown> = { followup_sent_at: sentAt.toISOString() };
+  if (text) {
+    const { data, error } = await supabase.from("conversations").select("recent_messages").eq("client_id", clientId).maybeSingle();
+    if (error) throw error;
+    set.recent_messages = [...((data?.recent_messages ?? []) as unknown[]), { role: "assistant", text, at: sentAt.toISOString() }].slice(-20);
+    set.updated_at = sentAt.toISOString();
+  }
+  const { error: updateError } = await supabase.from("conversations").update(set).eq("client_id", clientId);
+  if (updateError) throw updateError;
+  return true;
+}
+
+export type WeeklyStats = {
+  activeChats: number; newChats: number; hotLeads: number; frustrated: number; handovers: number;
+  messagesIn: number; messagesOut: number; ordersCreated: number; slipsWaiting: number; confirmedOrders: number; confirmedDeposits: number;
+  followUpsSent: number; knowledgeAdded: number; learnedAnswersPending: number; topObjections: Array<[string, number]>;
+};
+
+export async function getWeeklyStats(now = new Date()): Promise<WeeklyStats | null> {
+  if (!useSupabase()) return null;
+  const supabase = getSupabaseServer();
+  const since = new Date(now.getTime() - 7 * 86_400_000).toISOString();
+  const count = async (table: string, apply: (query: any) => any) => { const { count: total, error } = await apply(supabase.from(table).select("*", { count: "exact", head: true })); if (error) throw error; return total ?? 0; };
+  const [chats, orderRows, messagesIn, messagesOut, handovers, followUpsSent, knowledgeAdded, learnedAnswersPending] = await Promise.all([
+    supabase.from("conversations").select("created_at, intent_score, sentiment, objection").gte("updated_at", since),
+    supabase.from("orders").select("state, deposit_amount, created_at, updated_at").gte("updated_at", since),
+    count("messages", (q) => q.eq("direction", "inbound").gte("created_at", since)),
+    count("messages", (q) => q.eq("direction", "outbound").gte("created_at", since)),
+    count("event_log", (q) => q.in("event_type", ["escalation", "frustrated_client", "voice_note"]).gte("created_at", since)),
+    count("event_log", (q) => q.eq("event_type", "follow_up_sent").gte("created_at", since)),
+    count("event_log", (q) => q.eq("event_type", "knowledge_added").gte("created_at", since)),
+    count("insights", (q) => q.eq("category", "Learned answer").eq("status", "suggested")),
+  ]);
+  if (chats.error) throw chats.error;
+  if (orderRows.error) throw orderRows.error;
+  const rows = chats.data ?? [];
+  const orders = orderRows.data ?? [];
+  const objections = new Map<string, number>();
+  for (const row of rows) if (row.objection && row.objection !== "none") objections.set(row.objection, (objections.get(row.objection) ?? 0) + 1);
+  const confirmed = orders.filter((order) => order.state === "confirmed_by_owner");
+  return {
+    activeChats: rows.length,
+    newChats: rows.filter((row) => row.created_at >= since).length,
+    hotLeads: rows.filter((row) => row.intent_score === "high").length,
+    frustrated: rows.filter((row) => row.sentiment === "frustrated").length,
+    handovers, messagesIn, messagesOut,
+    ordersCreated: orders.filter((order) => order.created_at >= since).length,
+    slipsWaiting: orders.filter((order) => order.state === "slip_received").length,
+    confirmedOrders: confirmed.length,
+    confirmedDeposits: confirmed.reduce((sum, order) => sum + (order.deposit_amount ?? 0), 0),
+    followUpsSent, knowledgeAdded, learnedAnswersPending,
+    topObjections: Array.from(objections.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3),
+  };
+}
+
+export async function lastEventAt(eventType: string): Promise<Date | null> {
+  if (!useSupabase()) return null;
+  const { data, error } = await getSupabaseServer().from("event_log").select("created_at").eq("event_type", eventType).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) throw error;
+  return data ? new Date(data.created_at) : null;
 }

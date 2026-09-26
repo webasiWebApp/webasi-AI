@@ -9,6 +9,7 @@ import { getUsageCounts, incrementUsage, logMessage } from "./db";
 import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
+import { sendWeeklySummary, weeklySummaryText } from "./automation";
 import { createConversationEngine } from "./conversations/engine";
 import { parseProjectSnapshot } from "../shared/webasi";
 
@@ -34,7 +35,7 @@ export const appRouter = router({
     settings: protectedProcedure.query(() => getSettings()),
   }),
   settings: router({
-    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
+    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
     updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
@@ -85,6 +86,10 @@ export const appRouter = router({
     pair: protectedProcedure.mutation(() => baileysTransport.startPairing()),
     reconnect: protectedProcedure.mutation(async () => { await baileysTransport.start(); return baileysTransport.getStatus(); }),
     reset: protectedProcedure.mutation(() => baileysTransport.resetSession()),
+  }),
+  summary: router({
+    weekly: protectedProcedure.query(async () => ({ text: await weeklySummaryText() })),
+    sendWeekly: protectedProcedure.mutation(async () => ({ delivered: await sendWeeklySummary() })),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
   insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), detail: z.string().trim().min(3).max(4000).optional() })).mutation(({ input }) => setInsightStatus(input.id, "approved", input.detail)), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
