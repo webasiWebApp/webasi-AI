@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot } from "./module-db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
 import { sendWeeklySummary, weeklySummaryText } from "./automation";
@@ -31,6 +31,10 @@ export const appRouter = router({
     training: protectedProcedure.input(z.object({ projectKey: z.string() })).query(({ input }) => getTraining(input.projectKey)),
     saveTraining: protectedProcedure.input(z.object({ projectKey: z.string(), answers: z.record(z.string(), z.string()), summary: z.string() })).mutation(({ input }) => saveTraining(input.projectKey, input.answers, input.summary)),
     approveTraining: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => approveTraining(input.projectKey)),
+  }),
+  knowledgeGaps: router({
+    list: protectedProcedure.query(() => listKnowledgeGaps()),
+    answer: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), answer: z.string().trim().min(3).max(4000) })).mutation(({ input }) => answerKnowledgeGap(input.id, input.answer)),
   }),
   conversations: router({
     pause: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => pauseConversation(input.clientId)),

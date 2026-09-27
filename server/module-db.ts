@@ -5,6 +5,7 @@ import { ENV } from "./_core/env";
 import { conversations, eventLogs, insights, orders, projects, settings, trainingSessions } from "../drizzle/schema";
 import { approvedRestaurantProject } from "./conversations/project";
 import { canActivateProject, formatAutomationAudit, parsePriceLkr, trainingReadiness } from "../shared/webasi";
+import { buildFaqCache, type FaqCache } from "./conversations/faq-cache";
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 const mapProject = (row: any) => row ? { ...row, projectKey: row.project_key, readiness: row.readiness ?? 0, snapshot: typeof row.snapshot === "string" ? row.snapshot : JSON.stringify(row.snapshot ?? {}), createdAt: row.created_at, updatedAt: row.updated_at } : null;
@@ -245,19 +246,64 @@ export async function approveTraining(projectKey: string) {
   if (!trainingReadiness(session.checklist, session.answers, session.summary).complete) return false;
   const snapshotObj = await compileProjectSnapshot(projectKey);
   const snapshotStr = snapshotObj ? JSON.stringify(snapshotObj) : "{}";
-  
+
   if (useSupabase()) {
     const supabase = getSupabaseServer();
     const { error: sessionError } = await supabase.from("training_sessions").update({ approved: true, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
     if (sessionError) throw sessionError;
     const { error: projectError } = await supabase.from("projects").update({ status: "approved", readiness: 100, snapshot: snapshotObj ?? {}, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
     if (projectError) throw projectError;
+    // Build the FAQ cache after the snapshot is committed.
+    await generateFaqCache(projectKey).catch((err) => console.warn("[Training] FAQ cache generation failed (non-fatal)", err));
     return true;
   }
   const db = await getDb(); if (!db) return false;
   await db.update(trainingSessions).set({ approved: 1 }).where(eq(trainingSessions.projectKey, projectKey));
   await db.update(projects).set({ status: "approved", readiness: 100, snapshot: snapshotStr, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
+  // Build the FAQ cache after the snapshot is committed.
+  await generateFaqCache(projectKey).catch((err) => console.warn("[Training] FAQ cache generation failed (non-fatal)", err));
   return true;
+}
+
+/**
+ * (Re-)compile the FAQ cache for a project and persist it into the snapshot.
+ * Called automatically by `approveTraining`; can also be triggered manually
+ * after `appendProjectFaq` / `answerKnowledgeGap` so the cache stays fresh.
+ */
+export async function generateFaqCache(projectKey: string): Promise<FaqCache | null> {
+  const snapshot = await compileProjectSnapshot(projectKey);
+  if (!snapshot) return null;
+
+  const faqCache: FaqCache = buildFaqCache(snapshot.faqs ?? "");
+
+  // Persist the compiled cache alongside the project snapshot.
+  if (useSupabase()) {
+    const supabase = getSupabaseServer();
+    const { data: current } = await supabase.from("projects").select("snapshot").eq("project_key", projectKey).maybeSingle();
+    const existing = typeof current?.snapshot === "object" ? current.snapshot : {};
+    const { error } = await supabase.from("projects").update({ snapshot: { ...(existing as object), faqCache }, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
+    if (error) throw error;
+  } else {
+    const db = await getDb();
+    if (db) {
+      const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1);
+      const existing = rows[0];
+      if (existing) {
+        let parsed: any = {};
+        try { parsed = typeof existing.snapshot === "string" ? JSON.parse(existing.snapshot) : (existing.snapshot ?? {}); } catch {}
+        await db.update(projects).set({ snapshot: JSON.stringify({ ...parsed, faqCache }), updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
+      }
+    }
+  }
+
+  await recordEvent({
+    eventType: "faq_cache_built",
+    severity: "info",
+    title: "FAQ cache compiled",
+    detail: `${faqCache.length} FAQ entr${faqCache.length === 1 ? "y" : "ies"} pre-compiled for instant lookup on project ${projectKey}.`,
+  });
+
+  return faqCache;
 }
 
 export async function setAiProvider(provider: "gemini" | "groq") {
@@ -332,3 +378,73 @@ export async function lastEventAt(eventType: string): Promise<Date | null> {
   if (error) throw error;
   return data ? new Date(data.created_at) : null;
 }
+
+// ─── Knowledge Gap Tracker ───────────────────────────────────────────────────
+// When the engine cannot answer a client question from the knowledge base it
+// calls trackKnowledgeGap(). The question is stored so the owner can supply
+// the missing answer from the Training tab. Once answered the answer is
+// appended to the active project's FAQs so future clients get an instant reply.
+
+export type KnowledgeGap = {
+  id: string | number;
+  question: string;
+  reason: string;
+  clientId: string | null;
+  status: "pending" | "answered";
+  answer: string | null;
+  createdAt: string;
+};
+
+export async function trackKnowledgeGap(question: string, reason: string, clientId?: string): Promise<boolean> {
+  const q = question.trim().slice(0, 500);
+  if (!q) return false;
+  if (useSupabase()) {
+    const supabase = getSupabaseServer();
+    // Deduplicate: don't store the same question twice within 24 h.
+    const since = new Date(Date.now() - 86_400_000).toISOString();
+    const { data: existing } = await supabase.from("knowledge_gaps").select("id").eq("question", q).eq("status", "pending").gte("created_at", since).maybeSingle();
+    if (existing) return false;
+    const { error } = await supabase.from("knowledge_gaps").insert({ question: q, reason, client_id: clientId ?? null, status: "pending", answer: null });
+    if (error) throw error;
+    return true;
+  }
+  // MySQL/SQLite fallback: record as an insight so it still surfaces somewhere.
+  const db = await getDb(); if (!db) return false;
+  await db.insert(insights).values({ title: q.slice(0, 200), detail: `Knowledge gap: ${reason}\nQ: ${q}`, category: "Knowledge Gap", status: "suggested" });
+  return true;
+}
+
+export async function listKnowledgeGaps(): Promise<KnowledgeGap[]> {
+  if (!useSupabase()) return [];
+  const { data, error } = await getSupabaseServer().from("knowledge_gaps").select("*").order("created_at", { ascending: false }).limit(50);
+  if (error) throw error;
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    question: row.question,
+    reason: row.reason,
+    clientId: row.client_id ?? null,
+    status: row.status,
+    answer: row.answer ?? null,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function answerKnowledgeGap(id: string | number, answer: string): Promise<boolean> {
+  const text = answer.trim();
+  if (!text) return false;
+  if (!useSupabase()) return false;
+  const supabase = getSupabaseServer();
+  const { data: gap, error: fetchError } = await supabase.from("knowledge_gaps").select("question, status").eq("id", id).maybeSingle();
+  if (fetchError) throw fetchError;
+  if (!gap || gap.status === "answered") return false;
+  const { error } = await supabase.from("knowledge_gaps").update({ status: "answered", answer: text }).eq("id", id);
+  if (error) throw error;
+  // Append as FAQ so the bot can answer this question immediately next time.
+  await appendProjectFaq(`Q: ${gap.question}\nA: ${text}`);
+  await recordEvent({ eventType: "knowledge_gap_answered", severity: "info", title: "Knowledge gap answered", detail: `Q: ${gap.question.slice(0, 200)}\nA: ${text.slice(0, 200)}` });
+  // Rebuild FAQ cache so the new answer is available for instant lookup immediately.
+  const active = await getActiveProject();
+  if (active) await generateFaqCache(active.projectKey).catch((err) => console.warn("[Training] FAQ cache rebuild failed (non-fatal)", err));
+  return true;
+}
+

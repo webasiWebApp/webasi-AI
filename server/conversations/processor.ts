@@ -5,9 +5,10 @@ import { nextOrderState, requiredOrderFields } from "../../shared/webasi";
 import { createConversationEngine, type StructuredReply } from "./engine";
 import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./sender";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
-import { createOrder, getSettings, recordEvent, getActiveProject, markOrderSlipReceived, compileProjectSnapshot } from "../module-db";
+import { createOrder, getSettings, recordEvent, getActiveProject, markOrderSlipReceived, compileProjectSnapshot, trackKnowledgeGap } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import { baileysTransport } from "../whatsapp/baileys";
+import { matchFaqCache, type FaqCache } from "./faq-cache";
 
 export type MessageProcessorDeps = {
   claimMessage?: typeof claimWhatsAppMessage;
@@ -72,16 +73,24 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const usage = deps.getUsageCounts ?? getUsageCounts;
   const increment = deps.incrementUsage ?? incrementUsage;
   const sendText = deps.sendText ?? (ENV.whatsappTransport === "baileys" ? (input) => baileysTransport.sendText(input) : createWhatsAppSender());
-  const settings = await getSettings();
-  const isOn = deps.isOn ?? settings.webasiEnabled;
   const now = deps.now ?? new Date();
   const who = message.profileName ?? "a client";
   const alert = (title: string, content: string) => notify({ title, content }).catch(() => false);
 
+  // Kick off settings + usage in parallel — both are independent reads and
+  // collectively save ~1.5–3 s compared to awaiting them one-by-one later.
+  const [settings, counts] = await Promise.all([getSettings(), (deps.getUsageCounts ?? getUsageCounts)()]);
+  const isOn = deps.isOn ?? settings.webasiEnabled;
+
   const claimed = await claim({ messageId: message.id, waId, messageType: message.type, clientId, body: textFor(message) || null });
   if (!claimed) return { accepted: true, duplicate: true, replied: false, reason: "duplicate_message" };
 
-  const snapshot = await getState(clientId, waId, message.profileName);
+  // Fetch conversation state and active project in parallel — both are safe to
+  // read before we decide whether to act on this message.
+  const [snapshot, activeProjectEarly] = await Promise.all([
+    getState(clientId, waId, message.profileName),
+    getActiveProject(),
+  ]);
   const daysSinceLastMessage = snapshot.lastClientMessageAt ? (now.getTime() - snapshot.lastClientMessageAt.getTime()) / 86_400_000 : null;
   snapshot.lastClientMessageAt = now;
   if (message.profileName) snapshot.profileName = message.profileName;
@@ -92,6 +101,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const done = async (reason: string, replied = false): Promise<ProcessResult> => { await saveState(snapshot); return { accepted: true, replied, reason, state: snapshot.state }; };
   if (snapshot.isPaused) return done("conversation_paused");
   if (!isOn) return done("automation_off");
+  if (snapshot.handedOver) return done("already_handed_over");
 
   let replyText: string | null = null;
   let structured: StructuredReply | null = null;
@@ -112,12 +122,11 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
     // Stickers, reactions, photos without a caption outside the deposit step: logged for the owner, no reply.
     return done("non_text_logged");
   } else {
-    const counts = await usage();
     if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap) || counts.geminiRequests >= settings.geminiDailyCap) {
       await event({ eventType: "usage_guard", severity: "warning", title: "Usage limit reached", detail: `WEBASI did not reply to ${who} because a monthly WhatsApp or daily AI limit was reached.`, clientId });
       return done("usage_guard_hard_stop");
     }
-    const activeProject = await getActiveProject();
+    const activeProject = activeProjectEarly;
     const project = activeProject ? await compileProjectSnapshot(activeProject.projectKey) : null;
     if (!project && !deps.runEngine) {
       // Never answer from demo facts: without an active project the owner must reply.
@@ -126,59 +135,84 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       await alert("WEBASI: no active project", `${who} messaged but no project is active, so WEBASI did not reply. Activate a project or reply yourself.`);
       return done("no_active_project");
     }
-    try {
-      const runEngine = deps.runEngine ?? createConversationEngine({ project: project ?? undefined, provider: settings.aiProvider }).runTurn;
-      structured = await runEngine({
-        clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages.slice(0, -1).map(({ role, text }) => ({ role, text })),
-        incomingText, isOn, withinCustomerWindow: true, monthlyOutbound: counts.outboundWhatsApp, monthlyCap: settings.whatsappMonthlyCap,
-        clientName: snapshot.extractedFields.clientName ?? message.profileName, clientNotes: snapshot.clientNotes, knownFields: snapshot.extractedFields, daysSinceLastMessage, now,
-      });
-      await increment("geminiRequests");
-      replyText = structured.reply;
+    // ── FAQ cache fast-path ──────────────────────────────────────────────────
+    // Check the pre-compiled answer cache before touching the LLM.
+    // Only applies to plain text questions while the conversation is still in
+    // an information-gathering or greeting state (not mid-order or handed-over).
+    if (project && !snapshot.handedOver && ["new", "collecting"].includes(snapshot.state)) {
+      let faqCache: FaqCache | null = null;
+      try {
+        const raw = typeof activeProject?.snapshot === "string" ? JSON.parse(activeProject.snapshot) : (activeProject?.snapshot ?? {});
+        faqCache = Array.isArray(raw?.faqCache) ? raw.faqCache as FaqCache : null;
+      } catch { /* malformed snapshot — fall through to engine */ }
 
-      const previousScore = snapshot.intentScore;
-      snapshot.intentScore = structured.intentScore ?? snapshot.intentScore;
-      snapshot.sentiment = structured.sentiment ?? snapshot.sentiment;
-      snapshot.objection = structured.objection ?? snapshot.objection;
-      snapshot.language = structured.language ?? snapshot.language;
-      if (structured.clientNotes) snapshot.clientNotes = structured.clientNotes;
-      const merged = mergeExtracted(snapshot, structured);
-      snapshot.extractedFields = merged.extractedFields;
-      snapshot.missingFields = merged.missingFields;
-
-      if (structured.needsOwner) {
-        snapshot.handedOver = true;
-        await event({ eventType: "escalation", severity: "warning", title: "Conversation needs owner", detail: structured.needsOwnerReason ?? "The assistant could not safely answer the client.", clientId });
-        await alert("WEBASI: a client needs you", `${who} asked: "${incomingText.slice(0, 200)}"\nReason: ${structured.needsOwnerReason ?? "outside the approved facts"}`);
-      } else if (structured.sentiment === "frustrated" && !snapshot.handedOver) {
-        snapshot.handedOver = true;
-        await event({ eventType: "frustrated_client", severity: "warning", title: "Client seems frustrated", detail: `${who} sounds frustrated. Consider taking over.`, clientId });
-        await alert("WEBASI: client seems frustrated", `${who}: "${incomingText.slice(0, 200)}"\nConsider replying personally.`);
-      }
-      if (structured.intentScore === "high" && previousScore !== "high") {
-        await event({ eventType: "hot_lead", severity: "info", title: "Hot lead", detail: `${who} looks ready to proceed.`, clientId });
-        await alert("WEBASI: hot lead 🔥", `${who} looks ready to proceed.${snapshot.clientNotes ? `\n${snapshot.clientNotes}` : ""}`);
-      }
-
-      if (snapshot.state === "collecting" && snapshot.missingFields.length === 0 && !structured.needsOwner && project) {
-        if (project.priceLkr > 0 && project.depositPercent > 0) {
-          const depositAmount = Math.round(project.priceLkr * project.depositPercent / 100);
-          replyText = `${structured.reply}\n\nSo that's the ${project.packageName} — LKR ${project.priceLkr.toLocaleString("en-LK")} in total, and a ${project.depositPercent}% deposit (LKR ${depositAmount.toLocaleString("en-LK")}) gets us started.\n\n${settings.bankDetails}\n\nOnce you've transferred, just send a photo of the slip here and the owner will confirm.`;
-          snapshot.state = nextOrderState(snapshot.state, "brief_complete");
-          await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: project.packageName, depositAmount, state: "awaiting_deposit", notes: "Brief complete; waiting for deposit slip." });
-        } else {
-          snapshot.handedOver = true;
-          replyText = "Thanks, I have everything I need! The owner will confirm the price and next steps with you shortly.";
-          await event({ eventType: "escalation", severity: "warning", title: "Brief complete but project has no price", detail: `The active project has no approved price or deposit, so ${who} was handed to the owner instead of being quoted.`, clientId });
+      if (faqCache && faqCache.length > 0) {
+        const match = matchFaqCache(incomingText, faqCache);
+        if (match) {
+          replyText = match.entry.answer;
+          await event({ eventType: "faq_cache_hit", severity: "info", title: "FAQ cache hit", detail: `Answered '${incomingText.slice(0, 120)}' from cache (score ${match.score.toFixed(2)}): ${match.entry.question.slice(0, 120)}`, clientId });
+          // Skip the rest of the engine block — jump straight to send.
         }
       }
-    } catch (error) {
-      console.error("[Processor] conversation engine failed", error instanceof Error ? error.message : error);
-      snapshot.handedOver = true;
-      await event({ eventType: "llm_failure", severity: "error", title: "Conversation engine unavailable", detail: "A holding reply was sent because the AI call failed or was rate limited.", clientId });
-      await alert("WEBASI: AI engine needs attention", `The AI failed while replying to ${who}. A holding reply was sent; please follow up.`);
-      replyText = "Sorry, give me a few minutes — I'll get back to you shortly.";
     }
+    // ── LLM engine (only reached on cache miss) ──────────────────────────────
+    if (!replyText) {
+      try {
+        const runEngine = deps.runEngine ?? createConversationEngine({ project: project ?? undefined, provider: settings.aiProvider }).runTurn;
+        structured = await runEngine({
+          clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages.slice(0, -1).map(({ role, text }) => ({ role, text })),
+          incomingText, isOn, withinCustomerWindow: true, monthlyOutbound: counts.outboundWhatsApp, monthlyCap: settings.whatsappMonthlyCap,
+          clientName: snapshot.extractedFields.clientName ?? message.profileName, clientNotes: snapshot.clientNotes, knownFields: snapshot.extractedFields, daysSinceLastMessage, now,
+        });
+        await increment("geminiRequests");
+        replyText = structured.reply;
+
+        const previousScore = snapshot.intentScore;
+        snapshot.intentScore = structured.intentScore ?? snapshot.intentScore;
+        snapshot.sentiment = structured.sentiment ?? snapshot.sentiment;
+        snapshot.objection = structured.objection ?? snapshot.objection;
+        snapshot.language = structured.language ?? snapshot.language;
+        if (structured.clientNotes) snapshot.clientNotes = structured.clientNotes;
+        const merged = mergeExtracted(snapshot, structured);
+        snapshot.extractedFields = merged.extractedFields;
+        snapshot.missingFields = merged.missingFields;
+
+        if (structured.needsOwner) {
+          snapshot.handedOver = true;
+          await event({ eventType: "escalation", severity: "warning", title: "Conversation needs owner", detail: structured.needsOwnerReason ?? "The assistant could not safely answer the client.", clientId });
+          await alert("WEBASI: a client needs you", `${who} asked: "${incomingText.slice(0, 200)}"\nReason: ${structured.needsOwnerReason ?? "outside the approved facts"}`);
+          // Track this as a knowledge gap so you can answer it from the Training tab.
+          await trackKnowledgeGap(incomingText, structured.needsOwnerReason ?? "outside_approved_facts", clientId).catch(() => {});
+        } else if (structured.sentiment === "frustrated" && !snapshot.handedOver) {
+          snapshot.handedOver = true;
+          await event({ eventType: "frustrated_client", severity: "warning", title: "Client seems frustrated", detail: `${who} sounds frustrated. Consider taking over.`, clientId });
+          await alert("WEBASI: client seems frustrated", `${who}: "${incomingText.slice(0, 200)}"\nConsider replying personally.`);
+        }
+        if (structured.intentScore === "high" && previousScore !== "high") {
+          await event({ eventType: "hot_lead", severity: "info", title: "Hot lead", detail: `${who} looks ready to proceed.`, clientId });
+          await alert("WEBASI: hot lead 🔥", `${who} looks ready to proceed.${snapshot.clientNotes ? `\n${snapshot.clientNotes}` : ""}`);
+        }
+
+        if (snapshot.state === "collecting" && snapshot.missingFields.length === 0 && !structured.needsOwner && project) {
+          if (project.priceLkr > 0 && project.depositPercent > 0) {
+            const depositAmount = Math.round(project.priceLkr * project.depositPercent / 100);
+            replyText = `${structured.reply}\n\nSo that's the ${project.packageName} — LKR ${project.priceLkr.toLocaleString("en-LK")} in total, and a ${project.depositPercent}% deposit (LKR ${depositAmount.toLocaleString("en-LK")}) gets us started.\n\n${settings.bankDetails}\n\nOnce you've transferred, just send a photo of the slip here and the owner will confirm.`;
+            snapshot.state = nextOrderState(snapshot.state, "brief_complete");
+            await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: project.packageName, depositAmount, state: "awaiting_deposit", notes: "Brief complete; waiting for deposit slip." });
+          } else {
+            snapshot.handedOver = true;
+            replyText = "Thanks, I have everything I need! The owner will confirm the price and next steps with you shortly.";
+            await event({ eventType: "escalation", severity: "warning", title: "Brief complete but project has no price", detail: `The active project has no approved price or deposit, so ${who} was handed to the owner instead of being quoted.`, clientId });
+          }
+        }
+      } catch (error) {
+        console.error("[Processor] conversation engine failed", error instanceof Error ? error.message : error);
+        snapshot.handedOver = true;
+        await event({ eventType: "llm_failure", severity: "error", title: "Conversation engine unavailable", detail: "A holding reply was sent because the AI call failed or was rate limited.", clientId });
+        await alert("WEBASI: AI engine needs attention", `The AI failed while replying to ${who}. A holding reply was sent; please follow up.`);
+        replyText = "Sorry, give me a few minutes — I'll get back to you shortly.";
+      }
+    } // end !replyText / LLM engine block
   }
 
   if (!replyText) return done("no_reply");
