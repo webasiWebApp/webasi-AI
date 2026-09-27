@@ -128,7 +128,9 @@ function scoreEntry(queryKeywords: string[], entry: FaqEntry): number {
   const querySet = new Set(queryKeywords);
 
   let intersection = 0;
-  for (const kw of querySet) if (entrySet.has(kw)) intersection++;
+  querySet.forEach((kw) => {
+    if (entrySet.has(kw)) intersection++;
+  });
 
   const union = entrySet.size + querySet.size - intersection;
   return union === 0 ? 0 : intersection / union;
