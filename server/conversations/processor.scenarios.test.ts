@@ -124,4 +124,25 @@ describe("Phase 8 scenarios", () => {
     expect(h.sendText).toHaveBeenCalledWith(expect.objectContaining({ humanize: true }));
     expect(h.saved.at(-1)?.recentMessages.map((m) => m.role)).toEqual(["client", "assistant"]);
   });
+
+  it("a client who names a meeting time is handed to the owner with the time and how they took the price", async () => {
+    const h = harness(snapshot({ extractedFields: { priceOk: "yes" } }), { runEngine: vi.fn().mockResolvedValue(engineReply({ reply: "Noted, I've passed that to the team and they'll confirm the time.", extractedFields: { meetingTime: "tomorrow (Friday) 3pm", meetingMode: "Google Meet" } })) });
+    const result = await processWhatsAppMessage(text("tomorrow 3pm on google meet is fine"), h.deps);
+
+    expect(result.replied).toBe(true);
+    expect(h.sendText).toHaveBeenCalledWith(expect.objectContaining({ body: "Noted, I've passed that to the team and they'll confirm the time." }));
+    expect(h.saved.at(-1)).toMatchObject({ handedOver: true, extractedFields: { priceOk: "yes", meetingTime: "tomorrow (Friday) 3pm", meetingMode: "Google Meet" } });
+    expect(h.notifyOwner).toHaveBeenCalledWith({ title: expect.stringContaining("meeting requested"), content: expect.stringMatching(/tomorrow \(Friday\) 3pm \(Google Meet\)[\s\S]*happy with the price/) });
+  });
+
+  it("the owner hears about a meeting once, and is told when the price was the problem", async () => {
+    const h = harness(snapshot(), { runEngine: vi.fn().mockResolvedValue(engineReply({ objection: "price", extractedFields: { meetingTime: "Monday morning" } })) });
+    await processWhatsAppMessage(text("monday morning"), h.deps);
+    expect(h.notifyOwner).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("not happy with the price") }));
+
+    const again = harness(snapshot({ extractedFields: { meetingTime: "Monday morning" } }), { runEngine: vi.fn().mockResolvedValue(engineReply({ extractedFields: { meetingTime: "Monday morning" } })) });
+    await processWhatsAppMessage(text("ok thanks"), again.deps);
+    expect(again.notifyOwner).not.toHaveBeenCalled();
+    expect(again.saved.at(-1)?.handedOver).toBeFalsy();
+  });
 });

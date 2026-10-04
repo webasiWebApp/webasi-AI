@@ -1,11 +1,12 @@
 import { and, desc, eq, ne } from "drizzle-orm";
-import { getDb } from "./db";
+import { getDb, incrementUsage } from "./db";
 import { getSupabaseServer } from "./_core/supabase";
 import { ENV } from "./_core/env";
 import { conversations, eventLogs, insights, orders, projects, settings, trainingSessions } from "../drizzle/schema";
-import { approvedRestaurantProject } from "./conversations/project";
+import { approvedRestaurantProject, type ApprovedProjectSnapshot } from "./conversations/project";
 import { canActivateProject, formatAutomationAudit, parsePriceLkr, trainingReadiness } from "../shared/webasi";
-import { buildFaqCache, type FaqCache } from "./conversations/faq-cache";
+import { buildFaqCache, type FaqEntry, type GeneratedFaqs } from "./conversations/faq-cache";
+import { generateClientFaqs, knowledgeFingerprint } from "./conversations/faq-generator";
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 
@@ -150,8 +151,8 @@ export async function appendProjectFaq(entry: string) {
   const { error } = await supabase.from("training_sessions").upsert({ project_key: active.projectKey, checklist: training.checklist, answers, summary: training.summary, approved: training.approved, updated_at: new Date().toISOString() }, { onConflict: "project_key" });
   if (error) throw error;
   invalidateProjectCaches();
-  // Rebuild the instant-answer cache so the new answer is used from the very next message.
-  await generateFaqCache(active.projectKey).catch((err) => console.warn("[Training] FAQ cache rebuild failed (non-fatal)", err));
+  // The generated client FAQs are still right after an added answer; re-stamp them so they are not treated as out of date.
+  await refreshInstantAnswers(active.projectKey).catch((err) => console.warn("[Training] Instant answers refresh failed (non-fatal)", err));
   await recordEvent({ eventType: "knowledge_added", severity: "info", title: "Answer added to knowledge base", detail: `Added to ${active.name} FAQs: ${entry.slice(0, 300)}` });
 }
 export async function analyzeInsights() {
@@ -254,7 +255,7 @@ export async function compileProjectSnapshot(projectKey: string) {
   compiledSnapshotCache.set(projectKey, { value, expiresAt: Date.now() + 30_000 });
   return value;
 }
-async function buildProjectSnapshot(projectKey: string) {
+async function buildProjectSnapshot(projectKey: string): Promise<ApprovedProjectSnapshot | null> {
   const selected = await getProjectByKey(projectKey);
   if (!selected) return null;
   let parsedSnapshot: any = null;
@@ -300,6 +301,7 @@ async function buildProjectSnapshot(projectKey: string) {
     // Read live from training so approved learned answers reach the bot without re-approving the project.
     faqs: answer("faqs") || parsedSnapshot?.faqs || "",
     escalationRules: answer("escalationRules") || parsedSnapshot?.escalationRules || "",
+    ...(Array.isArray(parsedSnapshot?.generatedFaqs?.entries) ? { generatedFaqs: parsedSnapshot.generatedFaqs as GeneratedFaqs } : {}),
   };
 }
 
@@ -316,60 +318,87 @@ export async function approveTraining(projectKey: string) {
     if (sessionError) throw sessionError;
     const { error: projectError } = await supabase.from("projects").update({ status: "approved", readiness: 100, snapshot: snapshotObj ?? {}, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
     if (projectError) throw projectError;
-    // Build the FAQ cache after the snapshot is committed.
-    await generateFaqCache(projectKey).catch((err) => console.warn("[Training] FAQ cache generation failed (non-fatal)", err));
+    // Write the client FAQs from the knowledge that was just approved.
+    await refreshInstantAnswers(projectKey, { regenerate: true }).catch((err) => console.warn("[Training] Client FAQ generation failed (non-fatal)", err));
     return true;
   }
   const db = await getDb(); if (!db) return false;
   await db.update(trainingSessions).set({ approved: 1 }).where(eq(trainingSessions.projectKey, projectKey));
   await db.update(projects).set({ status: "approved", readiness: 100, snapshot: snapshotStr, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
-  // Build the FAQ cache after the snapshot is committed.
-  await generateFaqCache(projectKey).catch((err) => console.warn("[Training] FAQ cache generation failed (non-fatal)", err));
+  // Write the client FAQs from the knowledge that was just approved.
+  await refreshInstantAnswers(projectKey, { regenerate: true }).catch((err) => console.warn("[Training] Client FAQ generation failed (non-fatal)", err));
   return true;
 }
 
-/**
- * (Re-)compile the FAQ cache for a project and persist it into the snapshot.
- * Called automatically by `approveTraining`; can also be triggered manually
- * after `appendProjectFaq` / `answerKnowledgeGap` so the cache stays fresh.
- */
-export async function generateFaqCache(projectKey: string): Promise<FaqCache | null> {
-  invalidateProjectCaches();
-  const snapshot = await compileProjectSnapshot(projectKey);
-  if (!snapshot) return null;
-
-  const faqCache: FaqCache = buildFaqCache(snapshot.faqs ?? "");
-
-  // Persist the compiled cache alongside the project snapshot.
+// The stored project snapshot holds the generated client FAQs next to the approved facts.
+async function writeGeneratedFaqs(projectKey: string, generatedFaqs: GeneratedFaqs) {
+  // `faqCache` is where an earlier version kept the parsed owner FAQs; those are now read from the training itself.
   if (useSupabase()) {
     const supabase = getSupabaseServer();
-    const { data: current } = await supabase.from("projects").select("snapshot").eq("project_key", projectKey).maybeSingle();
-    const existing = typeof current?.snapshot === "object" ? current.snapshot : {};
-    const { error } = await supabase.from("projects").update({ snapshot: { ...(existing as object), faqCache }, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
+    const { data: current, error: readError } = await supabase.from("projects").select("snapshot").eq("project_key", projectKey).maybeSingle();
+    if (readError) throw readError;
+    const { faqCache: _legacy, ...existing } = (current?.snapshot && typeof current.snapshot === "object" ? current.snapshot : {}) as Record<string, unknown>;
+    const { error } = await supabase.from("projects").update({ snapshot: { ...existing, generatedFaqs }, updated_at: new Date().toISOString() }).eq("project_key", projectKey);
     if (error) throw error;
   } else {
     const db = await getDb();
-    if (db) {
-      const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1);
-      const existing = rows[0];
-      if (existing) {
-        let parsed: any = {};
-        try { parsed = typeof existing.snapshot === "string" ? JSON.parse(existing.snapshot) : (existing.snapshot ?? {}); } catch {}
-        await db.update(projects).set({ snapshot: JSON.stringify({ ...parsed, faqCache }), updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
-      }
-    }
+    if (!db) return;
+    const existing = (await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1))[0];
+    if (!existing) return;
+    let parsed: Record<string, unknown> = {};
+    try { parsed = JSON.parse(existing.snapshot) ?? {}; } catch {}
+    const { faqCache: _legacy, ...rest } = parsed;
+    await db.update(projects).set({ snapshot: JSON.stringify({ ...rest, generatedFaqs }), updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
   }
-
   invalidateProjectCaches(); // the stored project row just changed
+}
 
-  await recordEvent({
-    eventType: "faq_cache_built",
-    severity: "info",
-    title: "FAQ cache compiled",
-    detail: `${faqCache.length} FAQ entr${faqCache.length === 1 ? "y" : "ies"} pre-compiled for instant lookup on project ${projectKey}.`,
-  });
+/**
+ * Keeps the generated client FAQs (the answers WEBASI gives without calling the AI) in step with the project knowledge.
+ * `regenerate` asks the AI to write them again: once when training is approved, or when the owner asks for it.
+ * Without it the stored answers are kept and marked as current, which is right after an answer was only added.
+ */
+export async function refreshInstantAnswers(projectKey: string, { regenerate = false }: { regenerate?: boolean } = {}): Promise<FaqEntry[] | null> {
+  invalidateProjectCaches();
+  const project = await compileProjectSnapshot(projectKey);
+  if (!project) return null;
+  if (!regenerate && !project.generatedFaqs) return [];
 
-  return faqCache;
+  let entries = project.generatedFaqs?.entries ?? [];
+  let generatedAt = project.generatedFaqs?.generatedAt ?? new Date().toISOString();
+  if (regenerate) {
+    entries = await generateClientFaqs(project, { provider: (await getSettings()).aiProvider });
+    generatedAt = new Date().toISOString();
+    await incrementUsage("geminiRequests").catch((err) => console.warn("[Training] usage counter failed", err));
+  }
+  await writeGeneratedFaqs(projectKey, { factsHash: knowledgeFingerprint(project), generatedAt, entries });
+
+  if (regenerate) await recordEvent({ eventType: "faq_cache_built", severity: "info", title: "Client FAQs generated", detail: `${entries.length} likely client question${entries.length === 1 ? "" : "s"} prepared for ${project.packageName}. WEBASI answers these without an AI request.` });
+  return entries;
+}
+
+// What the Training page shows: the owner's FAQs, the generated ones, and whether those are still in use.
+export async function getInstantAnswers(projectKey: string) {
+  const project = await compileProjectSnapshot(projectKey);
+  const generated = project?.generatedFaqs ?? null;
+  return {
+    owner: project ? buildFaqCache(project.faqs ?? "") : [],
+    generated: generated?.entries ?? [],
+    generatedAt: generated?.generatedAt ?? null,
+    outOfDate: Boolean(project && generated && generated.factsHash !== knowledgeFingerprint(project)),
+    englishForSinglish: ENV.faqEnglishForSinglish,
+  };
+}
+
+// Removes one generated question that the owner does not want answered this way; the AI answers it again from then on.
+export async function removeInstantAnswer(projectKey: string, question: string) {
+  invalidateProjectCaches();
+  const project = await compileProjectSnapshot(projectKey);
+  if (!project?.generatedFaqs) return false;
+  const entries = project.generatedFaqs.entries.filter((entry) => entry.question !== question);
+  if (entries.length === project.generatedFaqs.entries.length) return false;
+  await writeGeneratedFaqs(projectKey, { ...project.generatedFaqs, entries });
+  return true;
 }
 
 export async function setAiProvider(provider: "gemini" | "groq") {
@@ -400,6 +429,7 @@ export type WeeklyStats = {
   activeChats: number; newChats: number; hotLeads: number; frustrated: number; handovers: number;
   messagesIn: number; messagesOut: number; ordersCreated: number; slipsWaiting: number; confirmedOrders: number; confirmedDeposits: number;
   followUpsSent: number; knowledgeAdded: number; learnedAnswersPending: number; topObjections: Array<[string, number]>;
+  meetingsRequested: number;
 };
 
 export async function getWeeklyStats(now = new Date()): Promise<WeeklyStats | null> {
@@ -407,7 +437,7 @@ export async function getWeeklyStats(now = new Date()): Promise<WeeklyStats | nu
   const supabase = getSupabaseServer();
   const since = new Date(now.getTime() - 7 * 86_400_000).toISOString();
   const count = async (table: string, apply: (query: any) => any) => { const { count: total, error } = await apply(supabase.from(table).select("*", { count: "exact", head: true })); if (error) throw error; return total ?? 0; };
-  const [chats, orderRows, messagesIn, messagesOut, handovers, followUpsSent, knowledgeAdded, learnedAnswersPending] = await Promise.all([
+  const [chats, orderRows, messagesIn, messagesOut, handovers, followUpsSent, knowledgeAdded, learnedAnswersPending, meetingsRequested] = await Promise.all([
     supabase.from("conversations").select("created_at, intent_score, sentiment, objection").gte("updated_at", since),
     supabase.from("orders").select("state, deposit_amount, created_at, updated_at").gte("updated_at", since),
     count("messages", (q) => q.eq("direction", "inbound").gte("created_at", since)),
@@ -416,6 +446,7 @@ export async function getWeeklyStats(now = new Date()): Promise<WeeklyStats | nu
     count("event_log", (q) => q.eq("event_type", "follow_up_sent").gte("created_at", since)),
     count("event_log", (q) => q.eq("event_type", "knowledge_added").gte("created_at", since)),
     count("insights", (q) => q.eq("category", "Learned answer").eq("status", "suggested")),
+    count("event_log", (q) => q.eq("event_type", "meeting_requested").gte("created_at", since)),
   ]);
   if (chats.error) throw chats.error;
   if (orderRows.error) throw orderRows.error;
@@ -434,7 +465,7 @@ export async function getWeeklyStats(now = new Date()): Promise<WeeklyStats | nu
     slipsWaiting: orders.filter((order) => order.state === "slip_received").length,
     confirmedOrders: confirmed.length,
     confirmedDeposits: confirmed.reduce((sum, order) => sum + (order.deposit_amount ?? 0), 0),
-    followUpsSent, knowledgeAdded, learnedAnswersPending,
+    followUpsSent, knowledgeAdded, learnedAnswersPending, meetingsRequested,
     topObjections: Array.from(objections.entries()).sort((a, b) => b[1] - a[1]).slice(0, 3),
   };
 }

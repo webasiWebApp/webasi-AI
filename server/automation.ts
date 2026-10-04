@@ -87,6 +87,7 @@ export function buildWeeklySummary(stats: WeeklyStats, usage: { outboundWhatsApp
   const lines = [
     `💬 ${stats.activeChats} active chats (${stats.newChats} new) · ${stats.messagesIn} messages in, ${stats.messagesOut} out`,
     `🔥 ${stats.hotLeads} hot lead${stats.hotLeads === 1 ? "" : "s"}${stats.frustrated ? ` · 😟 ${stats.frustrated} frustrated` : ""} · 🙋 ${stats.handovers} handed to you`,
+    `📅 ${stats.meetingsRequested} meeting${stats.meetingsRequested === 1 ? "" : "s"} requested`,
     `🧾 ${stats.ordersCreated} new order${stats.ordersCreated === 1 ? "" : "s"} · ✅ ${stats.confirmedOrders} confirmed (${lkr(stats.confirmedDeposits)} deposits)${stats.slipsWaiting ? ` · ⏳ ${stats.slipsWaiting} slip${stats.slipsWaiting === 1 ? "" : "s"} to verify` : ""}`,
     `🔁 ${stats.followUpsSent} follow-up${stats.followUpsSent === 1 ? "" : "s"} sent`,
     stats.topObjections.length ? `🤔 Top objections: ${stats.topObjections.map(([name, total]) => `${name.replaceAll("_", " ")} (${total})`).join(", ")}` : "",

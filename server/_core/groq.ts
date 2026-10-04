@@ -22,7 +22,7 @@ function normalizeMessage(message: Message) {
   };
 }
 
-export async function invokeGroq(input: InvokeParams, { failFast = false }: InvokeOptions = {}): Promise<InvokeResult> {
+export async function invokeGroq(input: InvokeParams, { failFast = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS }: InvokeOptions = {}): Promise<InvokeResult> {
   if (!ENV.groqApiKey) throw new Error("GROQ_API_KEY is not configured");
   
   // For Groq, use the requested model or default to openai/gpt-oss-120b
@@ -68,7 +68,7 @@ export async function invokeGroq(input: InvokeParams, { failFast = false }: Invo
           authorization: `Bearer ${ENV.groqApiKey}`,
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       body = await response.json();
     } catch (error) {

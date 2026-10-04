@@ -22,6 +22,9 @@ export const ENV = {
   aiProvider: process.env.AI_PROVIDER ?? "gemini",
   webasiEnabled: process.env.WEBASI_ENABLED !== "false",
   webasiLlmModel: process.env.WEBASI_LLM_MODEL ?? "gemini-3-flash-preview",
+  // Instant answers are English. Off: a Singlish question always goes to the AI, which replies in Singlish.
+  // On: a Singlish question that clearly matches gets the English instant answer, saving the AI request.
+  faqEnglishForSinglish: process.env.FAQ_ENGLISH_FOR_SINGLISH === "true",
   whatsappTransport: process.env.WHATSAPP_TRANSPORT ?? "baileys",
   baileysPhoneNumber: process.env.BAILEYS_PHONE_NUMBER ?? "",
   baileysSessionEncryptionKey: process.env.BAILEYS_SESSION_ENCRYPTION_KEY ?? process.env.JWT_SECRET ?? "",

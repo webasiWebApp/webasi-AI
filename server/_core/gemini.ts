@@ -46,7 +46,7 @@ function modelName(requestedModel?: string) {
   return configured.replace(/^models\//, "");
 }
 
-export async function invokeGemini(input: InvokeParams, { failFast = false }: InvokeOptions = {}): Promise<InvokeResult> {
+export async function invokeGemini(input: InvokeParams, { failFast = false, timeoutMs = LLM_REQUEST_TIMEOUT_MS }: InvokeOptions = {}): Promise<InvokeResult> {
   if (!ENV.geminiApiKey) throw new Error("GEMINI_API_KEY is not configured");
   const selectedModel = modelName(input.model);
   const system = input.messages.filter((message) => message.role === "system").map((message) => contentToText(message.content)).join("\n\n");
@@ -63,7 +63,7 @@ export async function invokeGemini(input: InvokeParams, { failFast = false }: In
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (!(await acquireRateLimit({ wait: !failFast }))) throw new RateLimitExceededError("Gemini requests-per-minute limit reached");
     try {
-      response = await fetch(`${GEMINI_BASE_URL}/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(ENV.geminiApiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, generationConfig: thinkingConfig ? { ...generationConfig, thinkingConfig } : generationConfig }), signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS) });
+      response = await fetch(`${GEMINI_BASE_URL}/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(ENV.geminiApiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, generationConfig: thinkingConfig ? { ...generationConfig, thinkingConfig } : generationConfig }), signal: AbortSignal.timeout(timeoutMs) });
       body = await response.json() as GeminiResponse;
     } catch (error) {
       // Network error or timeout: one more try, then let the caller fall back.
