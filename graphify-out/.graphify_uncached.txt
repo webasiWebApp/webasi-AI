@@ -1,0 +1,12 @@
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\.completion-notes.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\.external-notes.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\.visual-check.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\BAILEYS.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\client\index.html
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\pnpm-workspace.yaml
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\public\fonts\README.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\supabase\README.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\task.md
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\public\fonts\fa-brands-400.svg
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\public\fonts\fa-regular-400.svg
+D:\Drive D\AVIX\Project\WEBASI AI\webasi-AI\public\fonts\fa-solid-900.svg

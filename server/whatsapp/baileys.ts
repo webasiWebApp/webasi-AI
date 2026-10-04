@@ -54,14 +54,24 @@ class BaileysTransport {
   private reconnectAttempt = 0;
   private reconnectTimer: NodeJS.Timeout | undefined;
   private readonly recentSends = new Map<string, number[]>();
-  private inboundQueue = Promise.resolve();
+  // One queue per chat: each client's messages are handled in order, but a reply being typed out to one client
+  // no longer makes every other client wait behind it.
+  private readonly chatQueues = new Map<string, Promise<void>>();
+  // When "typing…" started showing in a chat, so the time the AI took counts toward the typing time.
+  private readonly typingSince = new Map<string, number>();
   private readonly lastInboundKey = new Map<string, WAMessageKey>();
   // IDs of messages this process sent, so their echoes are never mistaken for the owner typing on the phone.
   private readonly sentIds = new Set<string>();
   // ponytail: in-memory buffer; texts still waiting when the process restarts are dropped, and only the last message ID in a burst is deduplicated.
-  private readonly textBuffer = createDebouncer<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>((_waId, items) => {
-    this.inboundQueue = this.inboundQueue.then(() => this.processBatch(items)).catch((error) => console.error("[Baileys] inbound processing failed", error));
+  private readonly textBuffer = createDebouncer<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>((waId, items) => {
+    this.inChatOrder(waId, () => this.processBatch(items));
   }, INBOUND_TEXT_DEBOUNCE_MS);
+
+  private inChatOrder(waId: string, task: () => Promise<void>) {
+    const next = (this.chatQueues.get(waId) ?? Promise.resolve()).then(task).catch((error) => console.error("[Baileys] inbound processing failed", error));
+    this.chatQueues.set(waId, next);
+    void next.then(() => { if (this.chatQueues.get(waId) === next) this.chatQueues.delete(waId); });
+  }
 
   async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, qr: this.qr, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
 
@@ -131,17 +141,19 @@ class BaileysTransport {
         await notifyOwner({ title: "WEBASI: WhatsApp reconnect required", content: "The Baileys linked-device session was logged out or invalidated. Open Connect WhatsApp and pair the number again." }).catch(() => false);
       } else {
         this.status = "reconnecting"; this.reconnectAttempt += 1;
-        const delay = Math.min(30000, 1000 * (2 ** Math.min(this.reconnectAttempt, 5)));
+        // "Connection replaced" means another process logged in with this same session: a second server instance, or a local dev
+        // server pointed at the production database. Retrying at once makes the two knock each other offline in a loop
+        // (79 reconnects in one day on 2026-09-29), so wait long enough for the other one to settle or shut down.
+        const replaced = statusCode === DisconnectReason.connectionReplaced;
+        const delay = replaced ? 60000 : Math.min(30000, 1000 * (2 ** Math.min(this.reconnectAttempt, 5)));
         clearTimeout(this.reconnectTimer); this.reconnectTimer = setTimeout(() => this.start().catch((error) => console.error("[Baileys] reconnect failed", error)), delay);
-        await recordEvent({ eventType: "baileys_reconnecting", severity: "warning", title: "WhatsApp reconnecting", detail: `Connection closed; retry ${this.reconnectAttempt} scheduled.` });
+        await recordEvent({ eventType: "baileys_reconnecting", severity: "warning", title: "WhatsApp reconnecting", detail: `Connection closed (code ${statusCode || "unknown"}${replaced ? ": another process is using this WhatsApp session" : ""}); retry ${this.reconnectAttempt} in ${Math.round(delay / 1000)}s.` });
       }
     }
   }
 
   private enqueueInbound(messages: WAMessage[]) {
-    for (const message of messages) {
-      this.inboundQueue = this.inboundQueue.then(() => this.handleInbound(message)).catch((error) => console.error("[Baileys] inbound processing failed", error));
-    }
+    for (const message of messages) this.inChatOrder(waIdFromJid(message.key.remoteJid ?? ""), () => this.handleInbound(message));
   }
 
   private async handleInbound(message: WAMessage) {
@@ -182,7 +194,19 @@ class BaileysTransport {
     if (!last) return;
     const body = items.map((item) => item.parsed.text?.body ?? "").filter(Boolean).join("\n");
     const parsed = items.length > 1 ? { ...last.parsed, text: { body } } : last.parsed;
-    await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText({ ...input, to: last.remoteJid }) });
+    await processWhatsAppMessage(parsed, { sendText: (input) => this.sendText({ ...input, to: last.remoteJid }), onReplying: () => this.showTyping(last.remoteJid) });
+  }
+
+  // Blue ticks and "typing…" as soon as WEBASI starts on a reply, rather than only after the AI has finished writing it.
+  private async showTyping(jid: string) {
+    const socket = this.socket;
+    if (!socket || this.status !== "connected") return;
+    const key = this.lastInboundKey.get(jid);
+    if (key) await socket.readMessages([key]).catch(() => undefined);
+    await socket.sendPresenceUpdate("available").catch(() => undefined);
+    await socket.presenceSubscribe(jid).catch(() => undefined);
+    await socket.sendPresenceUpdate("composing", jid).catch(() => undefined);
+    this.typingSince.set(jid, Date.now());
   }
 
   async startPairing() {
@@ -220,20 +244,26 @@ class BaileysTransport {
     const parts = input.humanize ? splitIntoBubbles(input.body) : [input.body];
     const recent = (this.recentSends.get(jid) ?? []).filter((time) => Date.now() - time < 60000);
     if (recent.length + parts.length > ENV.baileysRateLimitPerMinute) return { accepted: false, reason: "baileys_rate_limited" };
+    // "typing…" may already be showing since the AI started writing (showTyping); anything older than 30s has lapsed on the client's phone.
+    const typingStarted = this.typingSince.get(jid);
+    this.typingSince.delete(jid);
+    const alreadyTypingSince = typingStarted && Date.now() - typingStarted < 30_000 ? typingStarted : undefined;
     try {
       const socket = this.socket;
-      if (input.humanize) {
+      if (input.humanize && !alreadyTypingSince) {
         const key = this.lastInboundKey.get(jid);
         if (key) await socket.readMessages([key]).catch(() => undefined);
         await socket.sendPresenceUpdate("available").catch(() => undefined);
       }
       let messageId: string | undefined;
-      for (const part of parts) {
+      for (const [index, part] of parts.entries()) {
         const last = recent.at(-1);
         if (!canSendBaileysMessage(recent, Date.now()) && last) await sleep(Math.max(0, 2500 - (Date.now() - last)));
         await socket.presenceSubscribe(jid).catch(() => undefined);
         await socket.sendPresenceUpdate("composing", jid);
-        await sleep(input.humanize ? typingDelayMs(part) : 500);
+        // The first bubble has been "typed" for as long as the AI took, so only the remainder is waited out.
+        const alreadyTypedMs = index === 0 && alreadyTypingSince ? Date.now() - alreadyTypingSince : 0;
+        await sleep(input.humanize ? Math.max(700, typingDelayMs(part) - alreadyTypedMs) : 500);
         await socket.sendPresenceUpdate("paused", jid);
         const sent = await socket.sendMessage(jid, { text: part });
         if (sent?.key?.id) { this.sentIds.add(sent.key.id); messageId ??= sent.key.id; }

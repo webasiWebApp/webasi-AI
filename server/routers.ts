@@ -3,7 +3,7 @@ import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
 import { sendWeeklySummary, weeklySummaryText } from "./automation";
@@ -40,10 +40,9 @@ export const appRouter = router({
     pause: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => pauseConversation(input.clientId)),
     resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
     ownerMessage: protectedProcedure.input(z.object({ clientId: z.string(), text: z.string().trim().min(1).max(2000) })).mutation(async ({ input }) => {
-      const conversation = (await listConversations()).find((row) => row.clientId === input.clientId);
+      const conversation = await getConversationByClientId(input.clientId);
       if (!conversation) return { accepted: false, reason: "conversation_not_found" };
-      const settings = await getSettings();
-      const counts = await getUsageCounts();
+      const [settings, counts] = await Promise.all([getSettings(), getUsageCounts()]);
       if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
       await pauseConversation(input.clientId);
       const result = await baileysTransport.sendText({ to: conversation.waId, body: input.text });
@@ -58,8 +57,7 @@ export const appRouter = router({
   }),
   testChat: router({
     turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
-      const projects = await listProjects();
-      const selected = projects.find((project) => project.projectKey === input.projectKey);
+      const selected = await getProjectByKey(input.projectKey);
       if (!selected) throw new TRPCError({ code: "NOT_FOUND", message: "The selected project no longer exists." });
       const parsedSnapshot = parseProjectSnapshot(selected.snapshot);
       const training = parsedSnapshot ? null : await getTraining(selected.projectKey);

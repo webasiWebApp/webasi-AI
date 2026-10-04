@@ -1,37 +1,13 @@
 import { ENV } from "./env";
 import type { InvokeParams, InvokeResult, MessageContent, Message, Tool, ToolChoice, OutputSchema, ResponseFormat } from "./llm";
+import { createMinuteLimiter, LLM_REQUEST_TIMEOUT_MS, RateLimitExceededError, type InvokeOptions } from "./rate-limit";
 
-export class RateLimitExceededError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RateLimitExceededError";
-  }
-}
+export { RateLimitExceededError };
 
 const GROQ_BASE_URL = "https://api.groq.com/openai/v1/chat/completions";
 
-const requestTimestamps: number[] = [];
-let rateLimitMutex = Promise.resolve();
-
-async function acquireRateLimit() {
-  const current = rateLimitMutex;
-  let release!: () => void;
-  rateLimitMutex = new Promise(resolve => { release = resolve; });
-  await current;
-  
-  const now = Date.now();
-  while (requestTimestamps.length > 0 && now - requestTimestamps[0] > 60000) {
-    requestTimestamps.shift();
-  }
-  // Groq rate limit (assuming 30 requests per minute for free tier fallback)
-  if (requestTimestamps.length >= 30) {
-    const oldest = requestTimestamps[0];
-    const waitTime = 60000 - (now - oldest);
-    if (waitTime > 0) await new Promise(resolve => setTimeout(resolve, waitTime));
-  }
-  requestTimestamps.push(Date.now());
-  release();
-}
+// Requests per minute. On the free tier the tokens-per-minute limit (8,000) is reached first; Groq reports that as a 429.
+const acquireRateLimit = createMinuteLimiter(30);
 
 function normalizeContent(content: MessageContent | MessageContent[]): string {
   const parts = Array.isArray(content) ? content : [content];
@@ -46,7 +22,7 @@ function normalizeMessage(message: Message) {
   };
 }
 
-export async function invokeGroq(input: InvokeParams): Promise<InvokeResult> {
+export async function invokeGroq(input: InvokeParams, { failFast = false }: InvokeOptions = {}): Promise<InvokeResult> {
   if (!ENV.groqApiKey) throw new Error("GROQ_API_KEY is not configured");
   
   // For Groq, use the requested model or default to openai/gpt-oss-120b
@@ -63,6 +39,9 @@ export async function invokeGroq(input: InvokeParams): Promise<InvokeResult> {
   if (input.max_tokens ?? input.maxTokens) {
     payload.max_tokens = input.max_tokens ?? input.maxTokens;
   }
+  // gpt-oss reasons before answering: measured ~400 hidden tokens per WhatsApp reply (76% of the output) against ~50 at "low".
+  // Those tokens count toward the tokens-per-minute limit, so less reasoning means faster replies and fewer rate limits.
+  if (selectedModel.includes("gpt-oss")) payload.reasoning_effort = "low";
   
   const responseFormat = input.response_format ?? input.responseFormat;
   if (responseFormat && responseFormat.type === "json_object") {
@@ -80,24 +59,35 @@ export async function invokeGroq(input: InvokeParams): Promise<InvokeResult> {
   let body: any;
   
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await acquireRateLimit();
-    response = await fetch(GROQ_BASE_URL, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${ENV.groqApiKey}`,
-      },
-      body: JSON.stringify(payload),
-    });
-    body = await response.json();
+    if (!(await acquireRateLimit({ wait: !failFast }))) throw new RateLimitExceededError("Groq requests-per-minute limit reached");
+    try {
+      response = await fetch(GROQ_BASE_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${ENV.groqApiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(LLM_REQUEST_TIMEOUT_MS),
+      });
+      body = await response.json();
+    } catch (error) {
+      // Network error or timeout: one more try, then let the caller fall back.
+      if (failFast || attempt >= 1) throw error;
+      continue;
+    }
     if (response.ok) break;
-    
+
     const isRateLimit = response.status === 429 || body?.error?.message?.toLowerCase().includes("rate limit") || body?.error?.message?.toLowerCase().includes("capacity");
     if (!isRateLimit && ![500, 502, 503, 504].includes(response.status)) break;
-    if (attempt >= 3) break;
-    
+    if (attempt >= 3 || (failFast && (isRateLimit || attempt >= 1))) break;
+
     let delayMs = 500 * (attempt + 1);
-    if (isRateLimit) delayMs = 2000 * (attempt + 1); // simple backoff
+    if (isRateLimit) {
+      // Groq says how long until the token window frees up; otherwise back off in steps.
+      const retryAfterSeconds = Number(response.headers.get("retry-after"));
+      delayMs = retryAfterSeconds > 0 ? Math.min(20_000, retryAfterSeconds * 1000 + 250) : 2000 * (attempt + 1);
+    }
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   

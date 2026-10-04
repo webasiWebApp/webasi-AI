@@ -6,6 +6,7 @@ import { getSupabaseServer } from "./_core/supabase";
 import type { OrderState } from "../shared/webasi";
 
 let _db: ReturnType<typeof drizzle> | null = null;
+let usageRpcMissing = false;
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
 
 export async function getDb() {
@@ -131,10 +132,19 @@ export async function incrementUsage(field: "outboundWhatsApp" | "geminiRequests
   const period = periodFor(field, date);
   if (useSupabase()) {
     const column = field === "outboundWhatsApp" ? "outbound_whatsapp" : "gemini_requests";
-    const { data, error } = await getSupabaseServer().from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
+    const supabase = getSupabaseServer();
+    // Try atomic increment via Postgres RPC; fall back to read-modify-write.
+    if (!usageRpcMissing) {
+      const { error: rpcError } = await supabase.rpc("increment_usage_counter", { p_period: period, p_column: column });
+      if (!rpcError) return;
+      // Function not created yet (migration 20261002 not applied): stop paying for a failed call on every increment.
+      if (rpcError.code === "PGRST202") usageRpcMissing = true;
+    }
+    // Fallback: read-modify-write (acceptable for single-server deployments).
+    const { data, error } = await supabase.from("usage_counters").select("outbound_whatsapp, gemini_requests").eq("period_key", period).maybeSingle();
     if (error) throw error;
     const next = (data?.[column] ?? 0) + 1;
-    const { error: upsertError } = await getSupabaseServer().from("usage_counters").upsert({ period_key: period, [column]: next, updated_at: new Date().toISOString() }, { onConflict: "period_key" });
+    const { error: upsertError } = await supabase.from("usage_counters").upsert({ period_key: period, [column]: next, updated_at: new Date().toISOString() }, { onConflict: "period_key" });
     if (upsertError) throw upsertError;
     return;
   }

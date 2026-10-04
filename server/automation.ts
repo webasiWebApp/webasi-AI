@@ -41,8 +41,8 @@ export function dueForFollowUp(chat: FollowUpCandidate, now: Date) {
 export function fallbackFollowUp(state: string, name?: string | null) {
   const hi = name ? `Hi ${name.split(" ")[0]}` : "Hi";
   return state === "awaiting_deposit"
-    ? `${hi}, just checking in — let me know if you have any questions about the deposit or the next steps 🙂`
-    : `${hi}, just following up on our chat — happy to help whenever you're ready. Any questions I can answer?`;
+    ? `${hi}, just checking in. Let me know if you have any questions about the deposit or the next steps 🙂`
+    : `${hi}, just following up on our chat. Happy to help whenever you're ready. Any questions I can answer?`;
 }
 
 const parseTranscript = (raw: unknown) => { try { return (typeof raw === "string" ? JSON.parse(raw) : raw ?? []) as Array<{ role: string; text: string }>; } catch { return []; } };

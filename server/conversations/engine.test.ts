@@ -53,7 +53,7 @@ describe("WEBASI grounded conversation engine", () => {
 
     expect(result.intent).toBe("prompt_injection");
     expect(result.needsOwner).toBe(true);
-    expect(result.reply).toContain("owner");
+    expect(result.reply).toContain("team agent");
     expect(callModel).not.toHaveBeenCalled();
   });
 
@@ -62,7 +62,7 @@ describe("WEBASI grounded conversation engine", () => {
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, isOn: false, incomingText: "Hi" });
 
     expect(result.needsOwner).toBe(true);
-    expect(result.reply).toContain("owner");
+    expect(result.reply).toContain("team agent");
     expect(callModel).not.toHaveBeenCalled();
   });
 
@@ -84,14 +84,14 @@ describe("WEBASI grounded conversation engine", () => {
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Can you make it cheaper?" });
 
     expect(result.needsOwner).toBe(true);
-    expect(result.reply).toContain("owner");
+    expect(result.reply).toContain("team agent");
   });
 
   it("does not throw when the model returns malformed JSON", async () => {
     const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: '{"reply":"This response is unfinished' } }] });
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });
 
-    expect(result.reply).toContain("owner");
+    expect(result.reply).toContain("team agent");
     expect(result.needsOwner).toBe(true);
   });
 });
@@ -116,6 +116,24 @@ describe("knowledge-grounded validation", () => {
   });
 });
 
+describe("handing an upset client to a person", () => {
+  it("keeps the model's own words when the client is not writing in English", async () => {
+    const callModel = vi.fn().mockResolvedValue(modelReply("Samawenna, parakku una. Team agent kenek dan oyata reply karanawa.", { sentiment: "frustrated", language: "singlish" }));
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "ai kawuruwath reply karanne nathte??" });
+    expect(result.reply).toContain("Samawenna");
+    expect(result).toMatchObject({ needsOwner: true, needsOwnerReason: "client_frustrated_or_competitor" });
+  });
+
+  it("uses the fixed wording in English, and never spends a retry on a client who is being handed over", async () => {
+    const callModel = vi.fn().mockResolvedValue(modelReply("We can match that for LKR 40,000.", { objection: "competitor", language: "english" }));
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Another guy said he'd do it for 40k" });
+    expect(callModel).toHaveBeenCalledOnce();
+    expect(result.reply).toContain("team agent");
+    expect(result.reply).not.toContain("40,000");
+    expect(result.needsOwner).toBe(true);
+  });
+});
+
 describe("model output tolerance", () => {
   it("uses the answer even when the model renames the reply key or returns notes as a list", async () => {
     const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: JSON.stringify({ replyMessage: "Portfolio website eke price LKR 85,000.", intentScore: "high", language: "Sinhala", clientNotes: ["Wants a portfolio site", "Asked price"] }) } }] });
@@ -124,6 +142,30 @@ describe("model output tolerance", () => {
     expect(result.needsOwner).toBe(false);
     expect(result.language).toBe("sinhala");
     expect(result.clientNotes).toBe("Wants a portfolio site\nAsked price");
+  });
+
+  it("asks once more when the output is unusable, and answers the client if the second try is fine", async () => {
+    const callModel = vi.fn()
+      .mockResolvedValueOnce({ choices: [{ message: { content: '{"reply":"This response is unfinished' } }] })
+      .mockResolvedValueOnce(modelReply("Yes, the logo can come later."));
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Can I send the logo later?" });
+    expect(callModel).toHaveBeenCalledTimes(2);
+    expect(result.reply).toBe("Yes, the logo can come later.");
+    expect(result.needsOwner).toBe(false);
+  });
+
+  it("reports unusable output as such when the second try fails too", async () => {
+    const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: "not json" } }] });
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });
+    expect(result).toMatchObject({ needsOwner: true, needsOwnerReason: "Model returned empty reply" });
+  });
+
+  it("cleans em dashes and markdown bold out of the reply without a second model call", async () => {
+    const callModel = vi.fn().mockResolvedValue(modelReply("Sure — the package is **LKR 85,000**."));
+    const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Price?" });
+    expect(callModel).toHaveBeenCalledOnce();
+    expect(result.reply).toBe("Sure, the package is LKR 85,000.");
+    expect(result.needsOwner).toBe(false);
   });
 
   it("tells the model the exact output keys, whatever the provider", async () => {

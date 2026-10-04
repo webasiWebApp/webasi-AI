@@ -72,12 +72,43 @@ describe("Phase 8 scenarios", () => {
     expect(again.notifyOwner).not.toHaveBeenCalled();
   });
 
-  it("voice notes get a polite reply and are flagged for the owner", async () => {
+  it("a voice note gets a polite request to type, the owner is told, and WEBASI keeps answering typed messages", async () => {
     const h = harness(snapshot());
     await processWhatsAppMessage({ ...text(""), type: "audio", text: undefined }, h.deps);
     expect(h.sendText.mock.calls[0]?.[0].body).toMatch(/voice note/i);
-    expect(h.saved.at(-1)).toMatchObject({ handedOver: true });
+    expect(h.notifyOwner).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringContaining("voice note") }));
+    expect(h.saved.at(-1)?.handedOver).toBeFalsy();
     expect(h.saved.at(-1)?.recentMessages.at(0)?.text).toBe("[Voice note]");
+  });
+
+  it("a second voice note straight after that request goes to the owner instead of repeating it", async () => {
+    const first = harness(snapshot());
+    await processWhatsAppMessage({ ...text("", "wamid.voice-1"), type: "audio", text: undefined }, first.deps);
+    const second = harness(first.saved.at(-1)!);
+    const result = await processWhatsAppMessage({ ...text("", "wamid.voice-2"), type: "audio", text: undefined }, second.deps);
+    expect(result.reason).toBe("voice_note_handed_over");
+    expect(second.sendText).not.toHaveBeenCalled();
+    expect(second.saved.at(-1)).toMatchObject({ handedOver: true });
+  });
+
+  it("a failing event log or alert never costs the client their answer", async () => {
+    const h = harness(snapshot(), { recordEvent: vi.fn().mockRejectedValue(new Error("event_log down")), notifyOwner: vi.fn().mockRejectedValue(new Error("alert down")), runEngine: vi.fn().mockResolvedValue(engineReply({ reply: "The package is ready in 14 days.", intentScore: "high" })) });
+    const result = await processWhatsAppMessage(text("how long?"), h.deps);
+    expect(result.replied).toBe(true);
+    expect(h.sendText).toHaveBeenCalledWith(expect.objectContaining({ body: "The package is ready in 14 days." }));
+    expect(h.saved.at(-1)?.handedOver).toBeFalsy();
+  });
+
+  it("starts the typing indicator before the AI is asked, and not at all when WEBASI stays quiet", async () => {
+    const onReplying = vi.fn();
+    const live = harness(snapshot(), { onReplying });
+    await processWhatsAppMessage(text("do you do logos?"), live.deps);
+    expect(onReplying).toHaveBeenCalledOnce();
+    expect(onReplying.mock.invocationCallOrder[0]).toBeLessThan(live.runEngine.mock.invocationCallOrder[0]);
+
+    const paused = harness(snapshot({ isPaused: true }), { onReplying: vi.fn() });
+    await processWhatsAppMessage(text("anyone there?"), paused.deps);
+    expect(paused.deps.onReplying).not.toHaveBeenCalled();
   });
 
   it("never answers from demo facts when no project is active", async () => {

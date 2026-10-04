@@ -16,6 +16,8 @@ export const ENV = {
   geminiDailyCap: Number(process.env.GEMINI_DAILY_CAP ?? 500),
   geminiApiKey: process.env.GEMINI_API_KEY ?? "",
   geminiModel: process.env.GEMINI_MODEL ?? "gemini-3.8-flash",
+  // The free tier allows 5 requests a minute per model; raise this on a paid plan.
+  geminiRpmLimit: Number(process.env.GEMINI_RPM_LIMIT ?? 5),
   groqApiKey: process.env.GROQ_API_KEY ?? "",
   aiProvider: process.env.AI_PROVIDER ?? "gemini",
   webasiEnabled: process.env.WEBASI_ENABLED !== "false",

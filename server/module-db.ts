@@ -8,11 +8,33 @@ import { canActivateProject, formatAutomationAudit, parsePriceLkr, trainingReadi
 import { buildFaqCache, type FaqCache } from "./conversations/faq-cache";
 
 const useSupabase = () => Boolean(ENV.supabaseUrl && ENV.supabaseServiceRoleKey);
+
+let _defaultsEnsured = false;
+
+function createTtlCache<T>(ttlMs: number) {
+  let value: T | undefined;
+  let expiresAt = 0;
+  return {
+    get(): T | undefined { return Date.now() < expiresAt ? value : undefined; },
+    set(v: T) { value = v; expiresAt = Date.now() + ttlMs; },
+    invalidate() { expiresAt = 0; },
+  };
+}
+
+// Settings, the active project and its compiled facts are read on every incoming message but change rarely.
+// Writes in this process invalidate them at once; the short TTL bounds how long a change made from another
+// server instance (for example the automation switch flipped from a separately hosted dashboard) takes to apply.
+const settingsCache = createTtlCache<Awaited<ReturnType<typeof loadSettings>>>(15_000);
+const activeProjectCache = createTtlCache<Awaited<ReturnType<typeof loadActiveProject>>>(30_000);
+const compiledSnapshotCache = new Map<string, { value: Awaited<ReturnType<typeof buildProjectSnapshot>>; expiresAt: number }>();
+function invalidateProjectCaches() { activeProjectCache.invalidate(); compiledSnapshotCache.clear(); }
+
 const mapProject = (row: any) => row ? { ...row, projectKey: row.project_key, readiness: row.readiness ?? 0, snapshot: typeof row.snapshot === "string" ? row.snapshot : JSON.stringify(row.snapshot ?? {}), createdAt: row.created_at, updatedAt: row.updated_at } : null;
 const mapConversation = (row: any) => ({ ...row, clientId: row.client_id, waId: row.wa_id, profileName: row.profile_name, isPaused: Boolean(row.is_paused), missingFields: row.missing_fields ?? [], extractedFields: row.extracted_fields ?? {}, recentMessages: JSON.stringify(row.recent_messages ?? []), lastClientMessageAt: row.last_client_message_at, intentScore: row.intent_score as "high" | "medium" | "low" | null, handedOver: Boolean(row.handed_over), needsOwner: Boolean(row.handed_over) || row.state === "needs_owner", sentiment: row.sentiment as string | null, objection: row.objection as string | null, language: row.language as string | null, clientNotes: (row.client_notes ?? "") as string, followupSentAt: row.followup_sent_at ? new Date(row.followup_sent_at) : null, createdAt: row.created_at, updatedAt: row.updated_at });
 const mapEvent = (row: any) => ({ ...row, eventType: row.event_type, clientId: row.client_id, createdAt: row.created_at });
 
 export async function ensureDefaults() {
+  if (_defaultsEnsured) return;
   if (useSupabase()) {
     const supabase = getSupabaseServer();
     const { data: existingSettings, error: settingsError } = await supabase.from("settings").select("id").eq("singleton_key", "owner").maybeSingle();
@@ -27,6 +49,7 @@ export async function ensureDefaults() {
       const { error } = await supabase.from("projects").insert({ project_key: approvedRestaurantProject.id, name: approvedRestaurantProject.packageName, status: "active", readiness: 100, version: approvedRestaurantProject.version, snapshot: approvedRestaurantProject });
       if (error) throw error;
     }
+    _defaultsEnsured = true;
     return;
   }
   const db = await getDb(); if (!db) return;
@@ -34,16 +57,32 @@ export async function ensureDefaults() {
   if (!existingSettings[0]) await db.insert(settings).values({ singletonKey: "owner", businessName: approvedRestaurantProject.businessName, bankDetails: "Configure bank details in Settings before activating deposits.", notificationEmail: null, webasiEnabled: 1, shadowMode: 0 });
   const existingProject = await db.select().from(projects).where(eq(projects.projectKey, approvedRestaurantProject.id)).limit(1);
   if (!existingProject[0]) await db.insert(projects).values({ projectKey: approvedRestaurantProject.id, name: approvedRestaurantProject.packageName, status: "active", readiness: 100, version: approvedRestaurantProject.version, snapshot: JSON.stringify(approvedRestaurantProject) });
+  _defaultsEnsured = true;
 }
 
 export async function listProjects() { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("projects").select("*").order("updated_at", { ascending: false }); if (error) throw error; return (data ?? []).map(mapProject); } const db = await getDb(); if (!db) return []; return db.select().from(projects).orderBy(desc(projects.updatedAt)); }
-export async function getActiveProject() { if (useSupabase()) { const supabase = getSupabaseServer(); const { data, error } = await supabase.from("projects").select("*").eq("status", "active").limit(1).maybeSingle(); if (error) throw error; if (data) return mapProject(data); const fallback = await supabase.from("projects").select("*").eq("status", "approved").limit(1).maybeSingle(); if (fallback.error) throw fallback.error; return mapProject(fallback.data); } const db = await getDb(); if (!db) return null; const rows = await db.select().from(projects).where(eq(projects.status, "active")).limit(1); return rows[0] ?? (await db.select().from(projects).where(eq(projects.status, "approved")).limit(1))[0] ?? null; }
-export async function createProject(input: { projectKey: string; name: string; snapshot: string }) { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("projects").insert({ project_key: input.projectKey, name: input.name, status: "training", readiness: 0, version: 1, snapshot: JSON.parse(input.snapshot) }).select("*").single(); if (error) throw error; return mapProject(data); } const db = await getDb(); if (!db) return null; await db.insert(projects).values({ ...input, status: "training", readiness: 0, version: 1 }); return db.select().from(projects).where(eq(projects.projectKey, input.projectKey)).limit(1).then((rows) => rows[0] ?? null); }
-export async function approveProject(projectKey: string) { if (useSupabase()) { const { error } = await getSupabaseServer().from("projects").update({ status: "approved", readiness: 100, updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (error) throw error; return true; } const db = await getDb(); if (!db) return false; await db.update(projects).set({ status: "approved", readiness: 100, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
-export async function activateProject(projectKey: string) { if (useSupabase()) { const supabase = getSupabaseServer(); const { data: project, error } = await supabase.from("projects").select("status, readiness").eq("project_key", projectKey).maybeSingle(); if (error) throw error; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; const deactivate = await supabase.from("projects").update({ status: "approved" }).eq("status", "active"); if (deactivate.error) throw deactivate.error; const activate = await supabase.from("projects").update({ status: "active", updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (activate.error) throw activate.error; return true; } const db = await getDb(); if (!db) return false; const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1); const project = rows[0]; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; await db.update(projects).set({ status: "approved" }).where(eq(projects.status, "active")); await db.update(projects).set({ status: "active", updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
+export async function getProjectByKey(projectKey: string) {
+  if (useSupabase()) {
+    const { data, error } = await getSupabaseServer().from("projects").select("*").eq("project_key", projectKey).maybeSingle();
+    if (error) throw error;
+    return mapProject(data);
+  }
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1);
+  return rows[0] ?? null;
+}
+async function loadActiveProject() { if (useSupabase()) { const supabase = getSupabaseServer(); const { data, error } = await supabase.from("projects").select("*").eq("status", "active").limit(1).maybeSingle(); if (error) throw error; if (data) return mapProject(data); const fallback = await supabase.from("projects").select("*").eq("status", "approved").limit(1).maybeSingle(); if (fallback.error) throw fallback.error; return mapProject(fallback.data); } const db = await getDb(); if (!db) return null; const rows = await db.select().from(projects).where(eq(projects.status, "active")).limit(1); return rows[0] ?? (await db.select().from(projects).where(eq(projects.status, "approved")).limit(1))[0] ?? null; }
+export async function getActiveProject() { const cached = activeProjectCache.get(); if (cached !== undefined) return cached; const result = await loadActiveProject(); activeProjectCache.set(result); return result; }
+export async function createProject(input: { projectKey: string; name: string; snapshot: string }) { invalidateProjectCaches(); if (useSupabase()) { const { data, error } = await getSupabaseServer().from("projects").insert({ project_key: input.projectKey, name: input.name, status: "training", readiness: 0, version: 1, snapshot: JSON.parse(input.snapshot) }).select("*").single(); if (error) throw error; return mapProject(data); } const db = await getDb(); if (!db) return null; await db.insert(projects).values({ ...input, status: "training", readiness: 0, version: 1 }); return db.select().from(projects).where(eq(projects.projectKey, input.projectKey)).limit(1).then((rows) => rows[0] ?? null); }
+export async function approveProject(projectKey: string) { invalidateProjectCaches(); if (useSupabase()) { const { error } = await getSupabaseServer().from("projects").update({ status: "approved", readiness: 100, updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (error) throw error; return true; } const db = await getDb(); if (!db) return false; await db.update(projects).set({ status: "approved", readiness: 100, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
+export async function activateProject(projectKey: string) { invalidateProjectCaches(); settingsCache.invalidate(); if (useSupabase()) { const supabase = getSupabaseServer(); const { data: project, error } = await supabase.from("projects").select("status, readiness").eq("project_key", projectKey).maybeSingle(); if (error) throw error; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; const deactivate = await supabase.from("projects").update({ status: "approved" }).eq("status", "active"); if (deactivate.error) throw deactivate.error; const activate = await supabase.from("projects").update({ status: "active", updated_at: new Date().toISOString() }).eq("project_key", projectKey); if (activate.error) throw activate.error; return true; } const db = await getDb(); if (!db) return false; const rows = await db.select().from(projects).where(eq(projects.projectKey, projectKey)).limit(1); const project = rows[0]; if (!project || !canActivateProject(project.status === "ready" || project.status === "approved" || project.readiness >= 100)) return false; await db.update(projects).set({ status: "approved" }).where(eq(projects.status, "active")); await db.update(projects).set({ status: "active", updatedAt: new Date() }).where(eq(projects.projectKey, projectKey)); return true; }
 
-export async function getSettings() { if (useSupabase()) { await ensureDefaults(); const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single(); if (error) throw error; return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false }; } const db = await getDb(); if (!db) return { businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; await ensureDefaults(); const rows = await db.select().from(settings).where(eq(settings.singletonKey, "owner")).limit(1); const row = rows[0]; return { ...row, webasiEnabled: row?.webasiEnabled === 1, shadowMode: row?.shadowMode === 1, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; }
+async function loadSettings() { if (useSupabase()) { await ensureDefaults(); const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single(); if (error) throw error; return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false }; } const db = await getDb(); if (!db) return { businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; await ensureDefaults(); const rows = await db.select().from(settings).where(eq(settings.singletonKey, "owner")).limit(1); const row = rows[0]; return { ...row, webasiEnabled: row?.webasiEnabled === 1, shadowMode: row?.shadowMode === 1, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false }; }
+export async function getSettings() { const cached = settingsCache.get(); if (cached) return cached; const result = await loadSettings(); settingsCache.set(result); return result; }
 export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean }) {
+  settingsCache.invalidate();
+  invalidateProjectCaches(); // the compiled facts fall back to the business name from settings
   await ensureDefaults();
   if (useSupabase()) {
     const supabase = getSupabaseServer();
@@ -110,6 +149,9 @@ export async function appendProjectFaq(entry: string) {
   const answers = { ...training.answers, faqs: [training.answers.faqs?.trim(), entry.trim()].filter(Boolean).join("\n\n") };
   const { error } = await supabase.from("training_sessions").upsert({ project_key: active.projectKey, checklist: training.checklist, answers, summary: training.summary, approved: training.approved, updated_at: new Date().toISOString() }, { onConflict: "project_key" });
   if (error) throw error;
+  invalidateProjectCaches();
+  // Rebuild the instant-answer cache so the new answer is used from the very next message.
+  await generateFaqCache(active.projectKey).catch((err) => console.warn("[Training] FAQ cache rebuild failed (non-fatal)", err));
   await recordEvent({ eventType: "knowledge_added", severity: "info", title: "Answer added to knowledge base", detail: `Added to ${active.name} FAQs: ${entry.slice(0, 300)}` });
 }
 export async function analyzeInsights() {
@@ -138,6 +180,17 @@ export async function analyzeInsights() {
   return listInsights();
 }
 export async function listConversations() { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("conversations").select("*").order("updated_at", { ascending: false }).limit(50); if (error) throw error; return (data ?? []).map(mapConversation); } const db = await getDb(); if (!db) return []; return db.select().from(conversations).orderBy(desc(conversations.updatedAt)).limit(50); }
+export async function getConversationByClientId(clientId: string) {
+  if (useSupabase()) {
+    const { data, error } = await getSupabaseServer().from("conversations").select("*").eq("client_id", clientId).maybeSingle();
+    if (error) throw error;
+    return data ? mapConversation(data) : null;
+  }
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db.select().from(conversations).where(eq(conversations.clientId, clientId)).limit(1);
+  return rows[0] ?? null;
+}
 export async function pauseConversationByWaId(waId: string) { if (useSupabase()) { const { data, error } = await getSupabaseServer().from("conversations").update({ is_paused: true, updated_at: new Date().toISOString() }).eq("wa_id", waId).eq("is_paused", false).select("client_id"); if (error) throw error; if (data?.[0]) await recordEvent({ eventType: "owner_echo", severity: "info", title: "Owner takeover detected", detail: "You replied from the phone; WEBASI is paused for this chat.", clientId: data[0].client_id }); return true; } const db = await getDb(); if (!db) return false; await db.update(conversations).set({ isPaused: 1, updatedAt: new Date() }).where(eq(conversations.waId, waId)); await recordEvent({ eventType: "owner_echo", severity: "info", title: "Owner takeover detected", detail: "You replied from the phone; WEBASI is paused for this chat." }); return true; }
 export async function recordOwnerMessageByWaId(waId: string, text: string) { if (useSupabase()) { if (!text.trim()) return false; const { data, error } = await getSupabaseServer().from("conversations").select("recent_messages").eq("wa_id", waId).maybeSingle(); if (error) throw error; if (!data) return false; const recentMessages = (data.recent_messages ?? []) as Array<{ role: "client" | "assistant" | "owner"; text: string }>; const normalized = text.trim(); const last = recentMessages.at(-1); if (last?.role === "owner" && last.text === normalized) return true; const { error: updateError } = await getSupabaseServer().from("conversations").update({ recent_messages: [...recentMessages, { role: "owner", text: normalized }].slice(-12), updated_at: new Date().toISOString() }).eq("wa_id", waId); if (updateError) throw updateError; return true; } const db = await getDb(); if (!db || !text.trim()) return false; const row = (await db.select().from(conversations).where(eq(conversations.waId, waId)).limit(1))[0]; if (!row) return false; let recentMessages: Array<{ role: "client" | "assistant" | "owner"; text: string }> = []; try { recentMessages = JSON.parse(row.recentMessages) as typeof recentMessages; } catch { recentMessages = []; } const normalized = text.trim(); const last = recentMessages.at(-1); if (last?.role === "owner" && last.text === normalized) return true; recentMessages.push({ role: "owner", text: normalized }); recentMessages = recentMessages.slice(-12); await db.update(conversations).set({ recentMessages: JSON.stringify(recentMessages), updatedAt: new Date() }).where(eq(conversations.waId, waId)); return true; }
 export async function captureLearnedAnswer(waId: string, ownerText: string) {
@@ -174,6 +227,7 @@ export async function getTraining(projectKey: string) {
 }
 
 export async function saveTraining(projectKey: string, answers: Record<string, string>, summary: string) {
+  invalidateProjectCaches();
   const readiness = trainingReadiness(trainingChecklist, answers, summary);
   if (useSupabase()) {
     const supabase = getSupabaseServer();
@@ -191,9 +245,17 @@ export async function saveTraining(projectKey: string, answers: Record<string, s
   else await db.update(trainingSessions).set({ answers: JSON.stringify(answers), summary, approved: 0 }).where(eq(trainingSessions.projectKey, projectKey));
   await db.update(projects).set({ status: readiness.complete ? "ready" : "training", readiness: readiness.readiness, updatedAt: new Date() }).where(eq(projects.projectKey, projectKey));
 }
+// Compiling costs two database reads, and every incoming message needs the result. Returning the same object
+// until something changes also lets the conversation engine keep its per-project work (facts text, allowed numbers).
 export async function compileProjectSnapshot(projectKey: string) {
-  const projectsList = await listProjects();
-  const selected = projectsList.find((p) => p.projectKey === projectKey);
+  const cached = compiledSnapshotCache.get(projectKey);
+  if (cached && Date.now() < cached.expiresAt) return cached.value;
+  const value = await buildProjectSnapshot(projectKey);
+  compiledSnapshotCache.set(projectKey, { value, expiresAt: Date.now() + 30_000 });
+  return value;
+}
+async function buildProjectSnapshot(projectKey: string) {
+  const selected = await getProjectByKey(projectKey);
   if (!selected) return null;
   let parsedSnapshot: any = null;
   try { parsedSnapshot = typeof selected.snapshot === "string" ? JSON.parse(selected.snapshot) : selected.snapshot; } catch {}
@@ -244,6 +306,7 @@ export async function compileProjectSnapshot(projectKey: string) {
 export async function approveTraining(projectKey: string) {
   const session = await getTraining(projectKey);
   if (!trainingReadiness(session.checklist, session.answers, session.summary).complete) return false;
+  invalidateProjectCaches();
   const snapshotObj = await compileProjectSnapshot(projectKey);
   const snapshotStr = snapshotObj ? JSON.stringify(snapshotObj) : "{}";
 
@@ -271,6 +334,7 @@ export async function approveTraining(projectKey: string) {
  * after `appendProjectFaq` / `answerKnowledgeGap` so the cache stays fresh.
  */
 export async function generateFaqCache(projectKey: string): Promise<FaqCache | null> {
+  invalidateProjectCaches();
   const snapshot = await compileProjectSnapshot(projectKey);
   if (!snapshot) return null;
 
@@ -296,6 +360,8 @@ export async function generateFaqCache(projectKey: string): Promise<FaqCache | n
     }
   }
 
+  invalidateProjectCaches(); // the stored project row just changed
+
   await recordEvent({
     eventType: "faq_cache_built",
     severity: "info",
@@ -307,6 +373,7 @@ export async function generateFaqCache(projectKey: string): Promise<FaqCache | n
 }
 
 export async function setAiProvider(provider: "gemini" | "groq") {
+  settingsCache.invalidate();
   if (useSupabase()) { const { error } = await getSupabaseServer().from("settings").update({ ai_provider: provider }).eq("singleton_key", "owner"); if (error) throw error; }
   else ENV.aiProvider = provider; // ponytail: MySQL schema has no column for this; resets on restart there
   await recordEvent({ eventType: "ai_provider_changed", severity: "info", title: "AI provider changed", detail: `Replies now use ${provider}.` });
@@ -439,12 +506,9 @@ export async function answerKnowledgeGap(id: string | number, answer: string): P
   if (!gap || gap.status === "answered") return false;
   const { error } = await supabase.from("knowledge_gaps").update({ status: "answered", answer: text }).eq("id", id);
   if (error) throw error;
-  // Append as FAQ so the bot can answer this question immediately next time.
+  // Append as FAQ so the bot can answer this question immediately next time (this also rebuilds the FAQ cache).
   await appendProjectFaq(`Q: ${gap.question}\nA: ${text}`);
   await recordEvent({ eventType: "knowledge_gap_answered", severity: "info", title: "Knowledge gap answered", detail: `Q: ${gap.question.slice(0, 200)}\nA: ${text.slice(0, 200)}` });
-  // Rebuild FAQ cache so the new answer is available for instant lookup immediately.
-  const active = await getActiveProject();
-  if (active) await generateFaqCache(active.projectKey).catch((err) => console.warn("[Training] FAQ cache rebuild failed (non-fatal)", err));
   return true;
 }
 
