@@ -3,11 +3,13 @@ import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, getInstantAnswers, refreshInstantAnswers, removeInstantAnswer, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
 import { sendWeeklySummary, weeklySummaryText } from "./automation";
-import { createConversationEngine } from "./conversations/engine";
+import { createConversationEngine, type StructuredReply } from "./conversations/engine";
+import { matchFaqCache } from "./conversations/faq-cache";
+import { instantAnswersFor, instantReplyText } from "./conversations/faq-generator";
 import { parseProjectSnapshot } from "../shared/webasi";
 
 export const appRouter = router({
@@ -31,6 +33,9 @@ export const appRouter = router({
     training: protectedProcedure.input(z.object({ projectKey: z.string() })).query(({ input }) => getTraining(input.projectKey)),
     saveTraining: protectedProcedure.input(z.object({ projectKey: z.string(), answers: z.record(z.string(), z.string()), summary: z.string() })).mutation(({ input }) => saveTraining(input.projectKey, input.answers, input.summary)),
     approveTraining: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => approveTraining(input.projectKey)),
+    instantAnswers: protectedProcedure.input(z.object({ projectKey: z.string() })).query(({ input }) => getInstantAnswers(input.projectKey)),
+    regenerateInstantAnswers: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(async ({ input }) => ({ count: (await refreshInstantAnswers(input.projectKey, { regenerate: true }))?.length ?? 0 })),
+    removeInstantAnswer: protectedProcedure.input(z.object({ projectKey: z.string(), question: z.string() })).mutation(({ input }) => removeInstantAnswer(input.projectKey, input.question)),
   }),
   knowledgeGaps: router({
     list: protectedProcedure.query(() => listKnowledgeGaps()),
@@ -56,7 +61,7 @@ export const appRouter = router({
     }),
   }),
   testChat: router({
-    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }) => {
+    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }): Promise<StructuredReply & { answeredFromFaqs?: boolean }> => {
       const selected = await getProjectByKey(input.projectKey);
       if (!selected) throw new TRPCError({ code: "NOT_FOUND", message: "The selected project no longer exists." });
       const parsedSnapshot = parseProjectSnapshot(selected.snapshot);
@@ -65,6 +70,9 @@ export const appRouter = router({
       if (!parsedSnapshot && (!training || (!training.approved && !projectIsApproved))) throw new TRPCError({ code: "PRECONDITION_FAILED", message: "Complete and approve this project's training before using Test Chat." });
       const snapshot = await compileProjectSnapshot(selected.projectKey);
       if (!snapshot) throw new TRPCError({ code: "NOT_FOUND", message: "Failed to compile project snapshot." });
+      // Same lookup as a real chat, so the owner can see which questions are answered without the AI.
+      const instant = ["new", "collecting"].includes(input.state) ? matchFaqCache(input.incomingText, instantAnswersFor(snapshot), { englishForSinglish: ENV.faqEnglishForSinglish }) : null;
+      if (instant) return { reply: instantReplyText(instant, snapshot), extractedFields: {}, intent: "question", needsOwner: false, needsOwnerReason: null, reliedOnFacts: [], answeredFromFaqs: true };
       const settings = await getSettings();
       return createConversationEngine({ project: snapshot, provider: settings.aiProvider }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
     }),

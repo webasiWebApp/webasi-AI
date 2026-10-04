@@ -6,7 +6,8 @@ export class RateLimitExceededError extends Error {
 }
 
 // failFast: give up on the first rate limit or timeout instead of waiting it out, so the caller can try another provider.
-export type InvokeOptions = { failFast?: boolean };
+// timeoutMs: for work no client is waiting on (a long generation), in place of LLM_REQUEST_TIMEOUT_MS.
+export type InvokeOptions = { failFast?: boolean; timeoutMs?: number };
 
 // One attempt may take this long before it is abandoned; a hung request must never stall a client's chat.
 export const LLM_REQUEST_TIMEOUT_MS = 20_000;

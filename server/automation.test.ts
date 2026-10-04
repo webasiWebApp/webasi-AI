@@ -67,9 +67,10 @@ describe("weekly summary", () => {
   });
 
   it("reads like a short WhatsApp report", () => {
-    const text = buildWeeklySummary({ activeChats: 12, newChats: 5, hotLeads: 1, frustrated: 0, handovers: 3, messagesIn: 80, messagesOut: 75, ordersCreated: 2, slipsWaiting: 1, confirmedOrders: 1, confirmedDeposits: 34000, followUpsSent: 4, knowledgeAdded: 2, learnedAnswersPending: 1, topObjections: [["price", 4], ["thinking_it_over", 2]] }, { outboundWhatsApp: 300 }, { whatsappMonthlyCap: 900 });
+    const text = buildWeeklySummary({ activeChats: 12, newChats: 5, hotLeads: 1, frustrated: 0, handovers: 3, messagesIn: 80, messagesOut: 75, ordersCreated: 2, slipsWaiting: 1, confirmedOrders: 1, confirmedDeposits: 34000, followUpsSent: 4, knowledgeAdded: 2, learnedAnswersPending: 1, meetingsRequested: 2, topObjections: [["price", 4], ["thinking_it_over", 2]] }, { outboundWhatsApp: 300 }, { whatsappMonthlyCap: 900 });
     expect(text).toContain("12 active chats (5 new)");
     expect(text).toContain("1 hot lead ·");
+    expect(text).toContain("2 meetings requested");
     expect(text).toContain("LKR 34,000 deposits");
     expect(text).toContain("1 slip to verify");
     expect(text).toContain("price (4), thinking it over (2)");

@@ -1,3 +1,5 @@
+import type { GeneratedFaqs } from "./faq-cache";
+
 export type ApprovedProjectSnapshot = {
   id: string;
   version: number;
@@ -18,6 +20,8 @@ export type ApprovedProjectSnapshot = {
   contactDetails: string;
   faqs?: string;
   escalationRules?: string;
+  // Client FAQs generated from these facts when training was approved; answered without the LLM (see faq-generator.ts).
+  generatedFaqs?: GeneratedFaqs;
 };
 
 export const approvedRestaurantProject: ApprovedProjectSnapshot = {

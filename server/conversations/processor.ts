@@ -9,12 +9,12 @@ import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 import { createOrder, getSettings, recordEvent, getActiveProject, markOrderSlipReceived, compileProjectSnapshot, trackKnowledgeGap } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import { baileysTransport } from "../whatsapp/baileys";
-import { matchFaqCache, type FaqCache } from "./faq-cache";
+import { matchFaqCache } from "./faq-cache";
+import { instantAnswersFor, instantReplyText } from "./faq-generator";
 
 // compileProjectSnapshot returns the same object until the project, its training or the settings change,
 // so object identity is what says the engine (and the facts it has prepared) is still current.
 let _cachedEngine: { project: ApprovedProjectSnapshot | null; provider: string; engine: ReturnType<typeof createConversationEngine> } | null = null;
-let _faqSnapshotCache: { projectKey: string; updatedAt: string; faqCache: FaqCache | null } | null = null;
 let _lastUsageAlertAt = 0;
 
 function engineFor(project: ApprovedProjectSnapshot | null, provider: string) {
@@ -141,6 +141,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
 
   let replyText: string | null = null;
   let structured: StructuredReply | null = null;
+  let answeredFromFaqs = false;
   const incomingText = textFor(message);
 
   if (message.type === "image" && snapshot.state === "awaiting_deposit") {
@@ -173,31 +174,14 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       return done("no_active_project");
     }
     // ── FAQ cache fast-path ──────────────────────────────────────────────────
-    // Check the pre-compiled answer cache before touching the LLM.
-    // Only applies to plain text questions while the conversation is still in
-    // an information-gathering or greeting state (not mid-order or handed-over).
-    if (project && !snapshot.handedOver && ["new", "collecting"].includes(snapshot.state)) {
-      const apKey = activeProject?.projectKey ?? "";
-      const apUpdated = activeProject?.updatedAt ?? "";
-      let faqCache: FaqCache | null = null;
-      if (_faqSnapshotCache && _faqSnapshotCache.projectKey === apKey && _faqSnapshotCache.updatedAt === apUpdated) {
-        faqCache = _faqSnapshotCache.faqCache;
-      } else {
-        try {
-          const raw = typeof activeProject?.snapshot === "string" ? JSON.parse(activeProject.snapshot) : (activeProject?.snapshot ?? {});
-          faqCache = Array.isArray(raw?.faqCache) ? raw.faqCache as FaqCache : null;
-        } catch { /* malformed snapshot -- fall through to engine */ }
-        _faqSnapshotCache = { projectKey: apKey, updatedAt: apUpdated, faqCache };
-      }
-
-      if (faqCache && faqCache.length > 0) {
-        const match = matchFaqCache(incomingText, faqCache);
-        if (match) {
-          replyText = match.entry.answer;
-          event({ eventType: "faq_cache_hit", severity: "info", title: "FAQ cache hit", detail: `Answered '${incomingText.slice(0, 120)}' from cache (score ${match.score.toFixed(2)}): ${match.entry.question.slice(0, 120)}`, clientId });
-          // Skip the rest of the engine block — jump straight to send.
-        }
-      }
+    // Look the question up in the owner's FAQs and the generated client FAQs before touching the LLM.
+    // Only while the conversation is still gathering information; from the deposit step on, every
+    // message goes through the engine.
+    const instant = project && ["new", "collecting"].includes(snapshot.state) ? matchFaqCache(incomingText, instantAnswersFor(project), { englishForSinglish: ENV.faqEnglishForSinglish }) : null;
+    if (instant && project) {
+      replyText = instantReplyText(instant, project, snapshot.extractedFields);
+      answeredFromFaqs = true;
+      event({ eventType: "faq_cache_hit", severity: "info", title: "Answered without AI", detail: `Answered '${incomingText.slice(0, 120)}' from the ${instant.entry.source === "owner" ? "project FAQs" : "generated client FAQs"} (score ${instant.score.toFixed(2)}): ${instant.entry.question.slice(0, 120)}`, clientId });
     }
     // ── LLM engine (only reached on cache miss) ──────────────────────────────
     if (!replyText) {
@@ -220,6 +204,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
         snapshot.objection = structured.objection ?? snapshot.objection;
         snapshot.language = structured.language ?? snapshot.language;
         if (structured.clientNotes) snapshot.clientNotes = structured.clientNotes;
+        const hadMeetingTime = Boolean(snapshot.extractedFields.meetingTime);
         const merged = mergeExtracted(snapshot, structured);
         snapshot.extractedFields = merged.extractedFields;
         snapshot.missingFields = merged.missingFields;
@@ -240,7 +225,20 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
           alert("WEBASI: hot lead 🔥", `${who} looks ready to proceed.${snapshot.clientNotes ? `\n${snapshot.clientNotes}` : ""}`);
         }
 
-        if (snapshot.state === "collecting" && snapshot.missingFields.length === 0 && !structured.needsOwner && project) {
+        // The client named a day and time for a meeting. Only the owner can confirm it, so the chat goes to them
+        // with what they need to reply: when, how, and how the client took the price.
+        const meetingRequested = !hadMeetingTime && Boolean(snapshot.extractedFields.meetingTime);
+        if (meetingRequested) {
+          const { meetingTime, meetingMode, priceOk } = snapshot.extractedFields;
+          const meeting = `${meetingTime}${meetingMode ? ` (${meetingMode})` : ""}`;
+          // The model does not always record a "no"; a price objection says the same thing.
+          const price = priceOk === "yes" ? "happy with the price" : priceOk === "no" || snapshot.objection === "price" ? "not happy with the price" : "price not discussed yet";
+          snapshot.handedOver = true;
+          event({ eventType: "meeting_requested", severity: "warning", title: "Meeting requested", detail: `${who} asked for a meeting: ${meeting}. Client is ${price}. Confirm the time with them.`, clientId });
+          alert("WEBASI: meeting requested 📅", `${who} would like a meeting: ${meeting}.\nClient is ${price}.${snapshot.clientNotes ? `\n${snapshot.clientNotes}` : ""}\nWEBASI said you will confirm the time and has left this chat to you.`);
+        }
+
+        if (snapshot.state === "collecting" && snapshot.missingFields.length === 0 && !structured.needsOwner && !meetingRequested && project) {
           if (project.priceLkr > 0 && project.depositPercent > 0) {
             const depositAmount = Math.round(project.priceLkr * project.depositPercent / 100);
             const bankDetails = String(settings.bankDetails ?? "").trim();
@@ -286,7 +284,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   if (result.accepted) {
     appendTranscript(snapshot, { role: "assistant", text: replyText, at: new Date().toISOString() });
     later("usage counter", (async () => { for (let part = 0; part < (result.parts ?? 1); part++) await increment("outboundWhatsApp"); })());
-    later("message log", log({ messageId: result.messageId ?? `out-${message.id}`, clientId, waId, role: "assistant", body: replyText, topic: structured?.intent ?? null, intentScore: snapshot.intentScore ?? null, handedOver: Boolean(structured?.needsOwner) }));
+    later("message log", log({ messageId: result.messageId ?? `out-${message.id}`, clientId, waId, role: "assistant", body: replyText, topic: structured?.intent ?? (answeredFromFaqs ? "question" : null), intentScore: snapshot.intentScore ?? null, handedOver: Boolean(structured?.needsOwner) }));
   } else {
     event({ eventType: "send_failed", severity: "error", title: "Reply not delivered", detail: `WEBASI could not send a reply to ${who}: ${result.reason ?? "unknown error"}.`, clientId });
   }
