@@ -17,6 +17,7 @@ Here's the updated task list with your changes applied.
 - [x] Build the ON/OFF switch runtime path. Settings, projects, conversations, usage counters, events, and takeover state now prefer Supabase when configured; apply the hosted migration before using production data.
 - [x] Build `/health` and `/healthz` endpoints. Connect cron-job.org after Render deployment.
 - [x] Dashboard has no login by choice — anyone with the link can open it, so treat the dashboard URL as the secret (don't share or index it). `/health` exposes no QR code or phone number.
+  - Optional: set `DASHBOARD_PASSWORD` in the server environment and the browser asks for that password (any user name) before the dashboard or its API can be used. Uptime checks (`/health`, `/healthz`, `/api/keepalive`) stay open. Leave it unset to keep the no-login behaviour.
 
 ## Phase 3 — AI conversation engine
 

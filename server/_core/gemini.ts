@@ -63,7 +63,8 @@ export async function invokeGemini(input: InvokeParams, { failFast = false, time
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (!(await acquireRateLimit({ wait: !failFast }))) throw new RateLimitExceededError("Gemini requests-per-minute limit reached");
     try {
-      response = await fetch(`${GEMINI_BASE_URL}/${encodeURIComponent(selectedModel)}:generateContent?key=${encodeURIComponent(ENV.geminiApiKey)}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, generationConfig: thinkingConfig ? { ...generationConfig, thinkingConfig } : generationConfig }), signal: AbortSignal.timeout(timeoutMs) });
+      // The key travels in a header, not the URL: URLs end up in proxy logs and error messages.
+      response = await fetch(`${GEMINI_BASE_URL}/${encodeURIComponent(selectedModel)}:generateContent`, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": ENV.geminiApiKey }, body: JSON.stringify({ systemInstruction: system ? { parts: [{ text: system }] } : undefined, contents, generationConfig: thinkingConfig ? { ...generationConfig, thinkingConfig } : generationConfig }), signal: AbortSignal.timeout(timeoutMs) });
       body = await response.json() as GeminiResponse;
     } catch (error) {
       // Network error or timeout: one more try, then let the caller fall back.

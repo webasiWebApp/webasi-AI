@@ -41,6 +41,8 @@ export function verifyWebhookChallenge(query: Record<string, unknown>, verifyTok
   const mode = query["hub.mode"];
   const token = query["hub.verify_token"];
   const challenge = query["hub.challenge"];
+  // Without a configured token nothing can be verified: an empty token must not match an empty parameter.
+  if (!verifyToken) return null;
   if (mode !== "subscribe" || token !== verifyToken || typeof challenge !== "string") return null;
   return challenge;
 }
@@ -99,7 +101,8 @@ export function registerWhatsAppWebhook(
       res.status(403).send("Forbidden");
       return;
     }
-    res.status(200).send(challenge);
+    // The challenge comes from the query string; as plain text it can never run as a page.
+    res.status(200).type("text/plain").send(challenge);
   });
 
   app.post(

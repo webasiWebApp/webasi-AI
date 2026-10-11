@@ -58,10 +58,20 @@ export function serveStatic(app: Express) {
     );
   }
 
-  app.use(express.static(distPath));
+  app.use(
+    express.static(distPath, {
+      // Vite puts a content hash in every file name under /assets, so those never change and can be cached for good.
+      // Everything else (index.html above all) is checked with the server each time, so a new deploy shows up at once.
+      setHeaders(res, filePath) {
+        const hashed = filePath.split(path.sep).includes("assets");
+        res.setHeader("Cache-Control", hashed ? "public, max-age=31536000, immutable" : "no-cache");
+      },
+    })
+  );
 
   // fall through to index.html if the file doesn't exist
   app.use("*", (_req, res) => {
+    res.setHeader("Cache-Control", "no-cache");
     res.sendFile(path.resolve(distPath, "index.html"));
   });
 }

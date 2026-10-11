@@ -17,6 +17,16 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/public"),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // React and the data layer change far less often than the dashboard's own code. In files of their own they
+        // stay in the browser cache across deploys instead of being downloaded again with every change.
+        manualChunks(id) {
+          if (/node_modules[\\/](?:react|react-dom|scheduler)[\\/]/.test(id)) return "react";
+          if (/node_modules[\\/](?:@tanstack|@trpc|superjson)[\\/]/.test(id)) return "data";
+        },
+      },
+    },
   },
   server: {
     allowedHosts: ["localhost", "127.0.0.1"],

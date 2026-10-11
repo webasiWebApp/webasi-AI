@@ -80,8 +80,12 @@ const responseSchema = {
 
 const injectionPattern = /(ignore|disregard|forget).{0,30}(instruction|rule|prompt)|system prompt|developer message|give me a discount|change the price|reveal your rules/i;
 const discountPattern = /give me a discount|change the price/i;
-const pricePattern = /(?:lkr|rs\.?|rupees?)\s*[\d,]+/gi;
-const percentPattern = /\b\d{1,3}%/g;
+// A rupee amount, however it is written: "LKR 85,000", "Rs.85000", "රු. 85,000", "85,000 LKR", "85000 rupees", "85,000/-", "85k".
+// The currency must be a word of its own: without that, "covers 5 pages" read as "rs 5" and a correct reply was thrown away.
+const amount = String.raw`(\d[\d,]*)(\s*k\b)?`;
+const currencyFirstPattern = new RegExp(String.raw`(?:\b(?:lkr|rs|rupees?)\.?|රු\.?)\s*${amount}`, "gi");
+const amountFirstPattern = new RegExp(String.raw`${amount}\s*(?:(?:lkr|rs|rupees?)\b|රු|\/-)`, "gi");
+const percentPattern = /\b\d{1,3}\s?%/g;
 const dayPattern = /\b\d{1,3}(?:\s*[–-]\s*\d{1,3})?\s*(?:business\s+)?days?\b/gi;
 
 // projectFacts and allowedNumbers are pure functions of `project`, and `project` is
@@ -171,14 +175,28 @@ function allowedNumbers(knowledge: string, project: ApprovedProjectSnapshot) {
   return numbers;
 }
 
+// Every rupee amount the reply quotes. "20k" may stand for 20,000 or appear in the knowledge as written, so both readings are kept.
+function quotedAmounts(reply: string): number[][] {
+  const amounts: number[][] = [];
+  const read = (_match: string, digits: string, thousands?: string) => {
+    const value = Number(digits.replace(/,/g, ""));
+    amounts.push(thousands ? [value * 1000, value] : [value]);
+    return " ";
+  };
+  // Currency-first amounts are taken out before looking for amount-first ones, so "5 pages LKR 85,000" is not read as "5 LKR".
+  reply.replace(currencyFirstPattern, read).replace(amountFirstPattern, read);
+  return amounts;
+}
+
 export function validateGroundedReply(reply: string, project: ApprovedProjectSnapshot, knowledge = projectFacts(project)): { valid: boolean; reason?: string } {
   const allowed = allowedNumbers(knowledge, project);
-  for (const price of reply.match(pricePattern) ?? []) {
-    const numeric = Number(price.replace(/[^0-9]/g, ""));
-    if (project.priceLkr > 0 && !allowed.has(numeric)) return { valid: false, reason: "reply_contains_unapproved_price" };
+  // Prices and percentages are checked whether or not the project states a price or a deposit: a project without them
+  // is exactly where an invented figure, or an invented discount, would otherwise go out unnoticed.
+  for (const readings of quotedAmounts(reply)) {
+    if (!readings.some((value) => allowed.has(value))) return { valid: false, reason: "reply_contains_unapproved_price" };
   }
   for (const percent of reply.match(percentPattern) ?? []) {
-    if (project.depositPercent > 0 && !allowed.has(Number(percent.replace("%", "")))) return { valid: false, reason: "reply_contains_unapproved_percentage" };
+    if (!allowed.has(Number(percent.replace(/[%\s]/g, "")))) return { valid: false, reason: "reply_contains_unapproved_percentage" };
   }
   for (const timeline of reply.match(dayPattern) ?? []) {
     const expectedDays = project.timelineBusinessDays.match(/\d+/g) ?? [];

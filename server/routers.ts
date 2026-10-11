@@ -12,6 +12,12 @@ import { matchFaqCache } from "./conversations/faq-cache";
 import { instantAnswersFor, instantReplyText } from "./conversations/faq-generator";
 import { parseProjectSnapshot } from "../shared/webasi";
 
+// Keys come from the dashboard's own lists; the bounds only keep junk out of the database and the caches.
+const key = z.string().min(1).max(200);
+const jsonObject = z.string().min(2).max(50_000).refine((value) => { try { const parsed = JSON.parse(value); return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed); } catch { return false; } }, "The project snapshot must be a JSON object.");
+// A refused change must reach the dashboard as an error; a plain `false` was shown there as success.
+const refuse = (code: "NOT_FOUND" | "PRECONDITION_FAILED", message: string): never => { throw new TRPCError({ code, message }); };
+
 export const appRouter = router({
   dashboard: router({
     overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversations(), listOrders(), listEvents()]); return { settings, activeProject, usage, conversations, orders, events }; }),
@@ -27,24 +33,24 @@ export const appRouter = router({
     updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
-    create: protectedProcedure.input(z.object({ projectKey: z.string().min(2), name: z.string().min(2), snapshot: z.string().min(2) })).mutation(({ input }) => createProject(input)),
-    approve: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => approveProject(input.projectKey)),
-    activate: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => activateProject(input.projectKey)),
-    training: protectedProcedure.input(z.object({ projectKey: z.string() })).query(({ input }) => getTraining(input.projectKey)),
-    saveTraining: protectedProcedure.input(z.object({ projectKey: z.string(), answers: z.record(z.string(), z.string()), summary: z.string() })).mutation(({ input }) => saveTraining(input.projectKey, input.answers, input.summary)),
-    approveTraining: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(({ input }) => approveTraining(input.projectKey)),
-    instantAnswers: protectedProcedure.input(z.object({ projectKey: z.string() })).query(({ input }) => getInstantAnswers(input.projectKey)),
-    regenerateInstantAnswers: protectedProcedure.input(z.object({ projectKey: z.string() })).mutation(async ({ input }) => ({ count: (await refreshInstantAnswers(input.projectKey, { regenerate: true }))?.length ?? 0 })),
-    removeInstantAnswer: protectedProcedure.input(z.object({ projectKey: z.string(), question: z.string() })).mutation(({ input }) => removeInstantAnswer(input.projectKey, input.question)),
+    create: protectedProcedure.input(z.object({ projectKey: z.string().regex(/^[a-z0-9_-]{2,100}$/i, "Use 2 to 100 letters, digits, hyphens or underscores."), name: z.string().trim().min(2).max(180), snapshot: jsonObject })).mutation(({ input }) => createProject(input)),
+    approve: protectedProcedure.input(z.object({ projectKey: key })).mutation(async ({ input }) => (await approveProject(input.projectKey)) || refuse("PRECONDITION_FAILED", "Complete this project's training before approving it.")),
+    activate: protectedProcedure.input(z.object({ projectKey: key })).mutation(({ input }) => activateProject(input.projectKey)),
+    training: protectedProcedure.input(z.object({ projectKey: key })).query(({ input }) => getTraining(input.projectKey)),
+    saveTraining: protectedProcedure.input(z.object({ projectKey: key, answers: z.record(z.string().max(60), z.string().max(20_000)), summary: z.string().max(20_000) })).mutation(async ({ input }) => (await saveTraining(input.projectKey, input.answers, input.summary)) || refuse("NOT_FOUND", "This project no longer exists.")),
+    approveTraining: protectedProcedure.input(z.object({ projectKey: key })).mutation(({ input }) => approveTraining(input.projectKey)),
+    instantAnswers: protectedProcedure.input(z.object({ projectKey: key })).query(({ input }) => getInstantAnswers(input.projectKey)),
+    regenerateInstantAnswers: protectedProcedure.input(z.object({ projectKey: key })).mutation(async ({ input }) => ({ count: (await refreshInstantAnswers(input.projectKey, { regenerate: true }))?.length ?? 0 })),
+    removeInstantAnswer: protectedProcedure.input(z.object({ projectKey: key, question: z.string().min(1).max(500) })).mutation(({ input }) => removeInstantAnswer(input.projectKey, input.question)),
   }),
   knowledgeGaps: router({
     list: protectedProcedure.query(() => listKnowledgeGaps()),
     answer: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), answer: z.string().trim().min(3).max(4000) })).mutation(({ input }) => answerKnowledgeGap(input.id, input.answer)),
   }),
   conversations: router({
-    pause: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => pauseConversation(input.clientId)),
-    resume: protectedProcedure.input(z.object({ clientId: z.string() })).mutation(({ input }) => resumeConversation(input.clientId)),
-    ownerMessage: protectedProcedure.input(z.object({ clientId: z.string(), text: z.string().trim().min(1).max(2000) })).mutation(async ({ input }) => {
+    pause: protectedProcedure.input(z.object({ clientId: key })).mutation(({ input }) => pauseConversation(input.clientId)),
+    resume: protectedProcedure.input(z.object({ clientId: key })).mutation(({ input }) => resumeConversation(input.clientId)),
+    ownerMessage: protectedProcedure.input(z.object({ clientId: key, text: z.string().trim().min(1).max(2000) })).mutation(async ({ input }) => {
       const conversation = await getConversationByClientId(input.clientId);
       if (!conversation) return { accepted: false, reason: "conversation_not_found" };
       const [settings, counts] = await Promise.all([getSettings(), getUsageCounts()]);
@@ -61,7 +67,7 @@ export const appRouter = router({
     }),
   }),
   testChat: router({
-    turn: protectedProcedure.input(z.object({ projectKey: z.string(), incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }): Promise<StructuredReply & { answeredFromFaqs?: boolean }> => {
+    turn: protectedProcedure.input(z.object({ projectKey: key, incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }): Promise<StructuredReply & { answeredFromFaqs?: boolean }> => {
       const selected = await getProjectByKey(input.projectKey);
       if (!selected) throw new TRPCError({ code: "NOT_FOUND", message: "The selected project no longer exists." });
       const parsedSnapshot = parseProjectSnapshot(selected.snapshot);
@@ -87,7 +93,7 @@ export const appRouter = router({
     weekly: protectedProcedure.query(async () => ({ text: await weeklySummaryText() })),
     sendWeekly: protectedProcedure.mutation(async () => ({ delivered: await sendWeeklySummary() })),
   }),
-  orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: z.string() })).mutation(({ input }) => confirmOrder(input.orderKey)), }),
+  orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: key })).mutation(async ({ input }) => (await confirmOrder(input.orderKey)) || refuse("PRECONDITION_FAILED", "Only an order with a received slip can be confirmed.")), }),
   insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), detail: z.string().trim().min(3).max(4000).optional() })).mutation(({ input }) => setInsightStatus(input.id, "approved", input.detail)), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
 });
 

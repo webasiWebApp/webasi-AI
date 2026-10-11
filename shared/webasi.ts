@@ -68,9 +68,40 @@ export function trainingReadiness(checklist: readonly string[], answers: Record<
   return { completed, total, readiness, complete: completed === total && Boolean(summary.trim()) };
 }
 
+// Splits the owner's "what is included and what is not" training answer into the two lists. A label such as
+// "Included:", "Not included:" or "Excludes -" switches the list for the items after it, wherever it appears, so an
+// item the owner excluded is never offered to a client as included.
+export function splitIncludedExcluded(text: string): { included: string[]; excluded: string[] } {
+  const label = String.raw`(not\s+included|excluded|excludes|exclusions?|included|includes|inclusions?)\s*[:\-–]\s*`;
+  const included: string[] = [];
+  const excluded: string[] = [];
+  let target = included;
+  for (const raw of text.replace(new RegExp(String.raw`\b${label}`, "gi"), "\n$&").split(/[\n,;]+/)) {
+    let item = raw.trim();
+    const match = item.match(new RegExp(`^${label}`, "i"));
+    if (match) {
+      target = /^(?:not|excl)/i.test(match[1]) ? excluded : included;
+      item = item.slice(match[0].length);
+    }
+    item = item.replace(/[.\s]+$/, "").trim();
+    if (item) target.push(item);
+  }
+  return { included, excluded };
+}
+
 export function usagePercent(value: number, limit: number): number {
   if (limit <= 0) return 100;
   return Math.min(100, Math.max(0, Math.round((value / limit) * 100)));
+}
+
+// When a usage counter starts again. The counters are kept per UTC month (WhatsApp) and per UTC day (AI requests).
+export function usageResetLabel(period: "month" | "day", now = new Date()): string {
+  if (period === "day") {
+    const hours = 24 - now.getUTCHours();
+    return hours <= 1 ? "Resets within the hour" : `Resets in ${hours} hours`;
+  }
+  const days = Math.ceil((Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1) - now.getTime()) / 86_400_000);
+  return days <= 1 ? "Resets tomorrow" : `Resets in ${days} days`;
 }
 
 export function canActivateProject(isReady: boolean): boolean {

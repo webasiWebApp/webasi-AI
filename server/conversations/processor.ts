@@ -248,8 +248,9 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
             replyText = hasBankDetails
               ? `${structured.reply}\n\n${quote}\n\n${bankDetails}\n\nOnce you've transferred, just send a photo of the slip here and our team will confirm.`
               : `${structured.reply}\n\n${quote}\n\nOur team will send you the payment details shortly.`;
-            snapshot.state = nextOrderState(snapshot.state, "brief_complete");
+            // The order first, then the state: if the order cannot be saved the chat must not sit in "awaiting deposit" without one.
             await create({ orderKey: `WA-${message.id.slice(-8)}`, clientId, waId, packageName: project.packageName, depositAmount, state: "awaiting_deposit", notes: "Brief complete; waiting for deposit slip." });
+            snapshot.state = nextOrderState(snapshot.state, "brief_complete");
             if (!hasBankDetails) {
               snapshot.handedOver = true;
               event({ eventType: "escalation", severity: "warning", title: "Bank details missing", detail: `${who} is ready to pay the deposit but no bank details are saved in Settings, so they were handed to you.`, clientId });

@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useLocation } from "wouter";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
-import ConnectWhatsApp from "./ConnectWhatsApp";
-import { parseProjectSnapshot, safeEventExportRows, csvCell } from "@shared/webasi";
+const ConnectWhatsApp = lazy(() => import("./ConnectWhatsApp"));
+import { parseProjectSnapshot, safeEventExportRows, csvCell, usagePercent, usageResetLabel } from "@shared/webasi";
 import {
   AlertCircle,
   ArrowUpRight,
@@ -52,8 +52,8 @@ function PageHeader({ eyebrow, title, description, action }: { eyebrow: string; 
 
 function StatusDot({ color = "#22C55E" }: { color?: string }) { return <span className="inline-block h-2 w-2 rounded-full" style={{ backgroundColor: color }} />; }
 
-function UsageMeter({ label, value, limit, unit, icon: Icon, tone = "blue" }: { label: string; value: number; limit: number; unit: string; icon: typeof MessageCircle; tone?: "blue" | "violet" }) {
-  const percent = Math.round((value / limit) * 100);
+function UsageMeter({ label, value, limit, unit, resets, icon: Icon, tone = "blue" }: { label: string; value: number; limit: number; unit: string; resets: string; icon: typeof MessageCircle; tone?: "blue" | "violet" }) {
+  const percent = usagePercent(value, limit);
   return (
     <div className="rounded-xl border border-[#E2E8F0] bg-white p-4">
       <div className="flex items-start justify-between gap-3">
@@ -61,17 +61,18 @@ function UsageMeter({ label, value, limit, unit, icon: Icon, tone = "blue" }: { 
         <span className="text-lg font-bold tracking-[-0.03em] text-[#0F172A]">{value.toLocaleString()}<span className="text-xs font-medium text-[#94A3B8]"> / {limit.toLocaleString()}</span></span>
       </div>
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#F1F5F9]"><div className={cn("h-full rounded-full transition-all", percent >= 70 ? "bg-[#F59E0B]" : tone === "blue" ? "bg-[#2563FF]" : "bg-[#8B5CF6]")} style={{ width: `${percent}%` }} /></div>
-      <div className="mt-2 flex items-center justify-between text-[10px] font-medium"><span className={percent >= 70 ? "text-[#D97706]" : "text-[#64748B]"}>{percent}% used</span><span className="text-[#94A3B8]">Resets in 9 days</span></div>
+      <div className="mt-2 flex items-center justify-between text-[10px] font-medium"><span className={percent >= 70 ? "text-[#D97706]" : "text-[#64748B]"}>{percent}% used</span><span className="text-[#94A3B8]">{resets}</span></div>
     </div>
   );
 }
 
 function HomePage() {
-  const [isOn, setIsOn] = useState(true);
+  const [isOn, setIsOn] = useState(false);
   const [, setLocation] = useLocation();
   const overview = trpc.dashboard.overview.useQuery(undefined, { retry: false });
   const whatsappStatus = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 8000, retry: false });
   const settings = overview.data?.settings;
+  const statusKnown = Boolean(settings);
   const activeProject = overview.data?.activeProject ?? null;
   const snapshot = activeProject ? parseProjectSnapshot(activeProject.snapshot) : null;
 
@@ -89,6 +90,7 @@ function HomePage() {
     }
 
     return {
+      id: row.clientId as string,
       name,
       initials,
       message,
@@ -179,7 +181,6 @@ function HomePage() {
   };
 
   const toggleProvider = () => {
-    // @ts-ignore
     const next = settings?.aiProvider === "groq" ? "gemini" : "groq";
     if (window.confirm(`Switch AI model to ${next.toUpperCase()}?`)) {
       updateProvider.mutate({ provider: next });
@@ -205,14 +206,13 @@ function HomePage() {
 
         <div className="flex flex-col gap-2 self-start">
           <div className="flex flex-wrap items-center gap-2.5 rounded-xl border border-[#E2E8F0] bg-white px-3 py-2 shadow-[0_4px_12px_-8px_rgba(15,23,42,0.25)]">
-            <StatusDot color={isOn ? "#22C55E" : "#94A3B8"} />
-            <span className="text-xs font-semibold text-[#1E293B]">{isOn ? "WEBASI is live" : "WEBASI is off"}</span>
-            <span className="ml-1 text-[11px] text-[#94A3B8]">{isOn ? "Live" : "Replies paused"}</span>
+            <StatusDot color={statusKnown && isOn ? "#22C55E" : "#94A3B8"} />
+            <span className="text-xs font-semibold text-[#1E293B]">{!statusKnown ? (overview.isError ? "Status unavailable" : "Checking status…") : isOn ? "WEBASI is live" : "WEBASI is off"}</span>
+            <span className="ml-1 text-[11px] text-[#94A3B8]">{!statusKnown ? "" : isOn ? "Live" : "Replies paused"}</span>
             <span className="h-4 w-px bg-[#E2E8F0]" />
             <StatusDot color={whatsappLabel === "connected" ? "#22C55E" : whatsappLabel === "reconnect required" ? "#DC2626" : "#F59E0B"} />
             <span className={cn("text-[11px] font-semibold", whatsappLabel === "reconnect required" ? "text-[#B91C1C]" : "text-[#64748B]")}>WhatsApp {whatsappLabel}</span>
             <span className="h-4 w-px bg-[#E2E8F0]" />
-            {/* @ts-ignore */}
             <button onClick={toggleProvider} disabled={updateProvider.isPending} className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-bold uppercase transition hover:bg-[#F1F5F9]">{settings?.aiProvider === "groq" ? "GROQ" : "GEMINI"} <RefreshCw className={cn("h-3 w-3", updateProvider.isPending && "animate-spin")} /></button>
           </div>
         </div>
@@ -239,7 +239,7 @@ function HomePage() {
             </div>
           </div>
 
-          <button onClick={toggleBot} className={cn("relative h-12 w-[104px] shrink-0 rounded-full p-1 transition-colors focus-visible:ring-2 focus-visible:ring-[#2563FF] active:scale-[0.98]", isOn ? "bg-[#2563FF]" : "bg-[#CBD5E1]")} aria-pressed={isOn} aria-label={isOn ? "Turn WEBASI off" : "Turn WEBASI on"}>
+          <button onClick={toggleBot} disabled={!statusKnown || updateSettings.isPending} className={cn("relative h-12 w-[104px] shrink-0 rounded-full p-1 transition-colors focus-visible:ring-2 focus-visible:ring-[#2563FF] active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-60", isOn ? "bg-[#2563FF]" : "bg-[#CBD5E1]")} aria-pressed={isOn} aria-label={isOn ? "Turn WEBASI off" : "Turn WEBASI on"}>
             <span className={cn("absolute top-1 flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-[0_3px_7px_rgba(15,23,42,0.18)] transition-transform", isOn ? "translate-x-[52px]" : "translate-x-0")}>{isOn ? <Check className="h-4 w-4 text-[#2563FF]" /> : <Pause className="h-4 w-4 text-[#94A3B8]" />}</span>
             <span className={cn("absolute inset-y-0 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "left-4 opacity-100" : "left-4 opacity-0")}>On</span>
             <span className={cn("absolute inset-y-0 right-4 flex items-center text-[10px] font-bold uppercase tracking-[0.12em] text-white transition-opacity", isOn ? "opacity-0" : "opacity-100")}>Off</span>
@@ -305,8 +305,8 @@ function HomePage() {
           </div>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <UsageMeter label="WhatsApp messages" value={usage.outboundWhatsApp} limit={settings?.whatsappMonthlyCap ?? 900} unit="Outbound this month" icon={MessageCircle} />
-            <UsageMeter label="Gemini requests" value={usage.geminiRequests} limit={settings?.geminiDailyCap ?? 500} unit="Requests today" icon={Sparkles} tone="violet" />
+            <UsageMeter label="WhatsApp messages" value={usage.outboundWhatsApp} limit={settings?.whatsappMonthlyCap ?? 900} unit="Outbound this month" resets={usageResetLabel("month")} icon={MessageCircle} />
+            <UsageMeter label="Gemini requests" value={usage.geminiRequests} limit={settings?.geminiDailyCap ?? 500} unit="Requests today" resets={usageResetLabel("day")} icon={Sparkles} tone="violet" />
           </div>
 
           <div className="mt-4 flex items-start gap-2 rounded-lg bg-[#FFF7ED] p-3 text-[11px] leading-5 text-[#9A3412]">
@@ -325,12 +325,12 @@ function HomePage() {
           </div>
 
           <div className="space-y-2">
-            {attentionItems.length ? attentionItems.map((item) => {
+            {attentionItems.length ? attentionItems.map((item, index) => {
               const Icon = item.icon;
               const colors = item.tone === "blue" ? "bg-[#EFF6FF] text-[#2563FF]" : item.tone === "amber" ? "bg-[#FFF7ED] text-[#F59E0B]" : "bg-[#F5F3FF] text-[#7C3AED]";
 
               return (
-                <button key={item.title} onClick={() => setLocation(item.path)} className="group flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-[#F8FAFC]">
+                <button key={item.path + "-" + index} onClick={() => setLocation(item.path)} className="group flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-[#F8FAFC]">
                   <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", colors)}><Icon className="h-4 w-4" /></div>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-xs font-semibold text-[#1E293B]">{item.title}</p>
@@ -355,7 +355,7 @@ function HomePage() {
 
         <div className="divide-y divide-[#F1F5F9]">
           {recentConversations.length ? recentConversations.map((conversation) => (
-            <button key={conversation.name} onClick={() => setLocation("/conversations")} className="flex w-full items-center gap-3 py-3 text-left transition first:pt-0 last:pb-0 hover:bg-[#FAFCFF]">
+            <button key={conversation.id} onClick={() => setLocation("/conversations")} className="flex w-full items-center gap-3 py-3 text-left transition first:pt-0 last:pb-0 hover:bg-[#FAFCFF]">
               <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", conversation.tone === "blue" ? "bg-[#DBEAFE] text-[#1D4ED8]" : conversation.tone === "amber" ? "bg-[#FFEDD5] text-[#C2410C]" : conversation.tone === "green" ? "bg-[#DCFCE7] text-[#15803D]" : "bg-[#EDE9FE] text-[#6D28D9]")}>{conversation.initials}</div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
@@ -409,7 +409,7 @@ function ConversationsPage() {
   const selected = filtered.find((row) => row.clientId === selectedClientId) ?? filtered[0] ?? null;
   useEffect(() => { if (selected && selected.clientId !== selectedClientId) setSelectedClientId(selected.clientId); }, [selected?.clientId, selectedClientId]);
   const messages = selected ? parseConversationMessages(selected.recentMessages) : [];
-  const initials = (selected?.profileName ?? selected?.waId ?? "?").split(/\\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase();
+  const initials = (selected?.profileName ?? selected?.waId ?? "?").split(/\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase();
   const lastActivity = selected?.updatedAt ? new Date(selected.updatedAt).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "No activity yet";
   const takeoverSelected = () => { if (!selected || selected.isPaused) return; if (window.confirm("Take over this conversation? WEBASI will stop replying until you resume it.")) pause.mutate({ clientId: selected.clientId }); };
   const resumeSelected = () => { if (!selected || !selected.isPaused) return; if (window.confirm("Resume WEBASI automation for this chat?")) resume.mutate({ clientId: selected.clientId }); };
@@ -417,7 +417,7 @@ function ConversationsPage() {
   return <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9">
     <PageHeader eyebrow="Workspace / Inbox" title="Conversations" description="Review live WhatsApp chats, see owner takeover state, and resume automation when you are ready." action={<button onClick={() => conversationsQuery.refetch()} className="webasi-button-secondary" disabled={conversationsQuery.isFetching}><RefreshCw className={cn("h-4 w-4", conversationsQuery.isFetching && "animate-spin")} />Refresh</button>} />
     <div className="grid gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
-      <section className="webasi-card overflow-hidden"><div className="border-b border-[#E2E8F0] p-4"><div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-[#94A3B8]" /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] pl-9 pr-3 text-xs outline-none focus:border-[#2563FF]" placeholder="Search conversations" /></div><div className="mt-3 flex flex-wrap gap-1.5"><button onClick={() => setFilter("all")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-bold", filter === "all" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F8FAFC] text-[#64748B]")}>All {rows.length}</button><button onClick={() => setFilter("paused")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "paused" ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F8FAFC] text-[#64748B]")}>Paused {rows.filter((row) => row.isPaused).length}</button><button onClick={() => setFilter("needs_owner")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "needs_owner" ? "bg-[#FEF2F2] text-[#B91C1C]" : "bg-[#F8FAFC] text-[#64748B]")}>Needs owner {rows.filter((row) => row.needsOwner).length}</button></div></div><div className="divide-y divide-[#F1F5F9]">{conversationsQuery.isLoading ? <div className="p-5 text-xs text-[#94A3B8]">Loading live conversations…</div> : filtered.length === 0 ? <div className="p-5 text-xs text-[#94A3B8]">No live conversations match this search.</div> : filtered.map((item) => { const itemInitials = (item.profileName ?? item.waId).split(/\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase(); return <button key={item.clientId} onClick={() => setSelectedClientId(item.clientId)} className={cn("flex w-full items-start gap-3 p-4 text-left transition", selected?.clientId === item.clientId ? "bg-[#EFF6FF]" : "hover:bg-[#FAFCFF]")}><div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{itemInitials}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-xs font-semibold text-[#1E293B]">{item.profileName ?? item.waId}</p><span className="shrink-0 text-[10px] text-[#94A3B8]">{new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p className="mt-1 truncate text-[11px] text-[#64748B]">{parseConversationMessages(item.recentMessages).at(-1)?.text ?? "No message content"}</p><span className={cn("mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{item.isPaused ? "Paused by owner" : item.state.replaceAll("_", " ")}</span>{"intentScore" in item && item.intentScore && <span className={cn("ml-1.5 mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold", item.intentScore === "high" ? "bg-[#F0FDF4] text-[#15803D]" : item.intentScore === "medium" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F1F5F9] text-[#94A3B8]")}>{item.intentScore} fit</span>}</div></button>; })}</div></section>
+      <section className="webasi-card overflow-hidden"><div className="border-b border-[#E2E8F0] p-4"><div className="relative"><Search className="absolute left-3 top-2.5 h-4 w-4 text-[#94A3B8]" /><input value={search} onChange={(event) => setSearch(event.target.value)} className="h-9 w-full rounded-lg border border-[#E2E8F0] bg-[#F8FAFC] pl-9 pr-3 text-xs outline-none focus:border-[#2563FF]" placeholder="Search conversations" /></div><div className="mt-3 flex flex-wrap gap-1.5"><button onClick={() => setFilter("all")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-bold", filter === "all" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F8FAFC] text-[#64748B]")}>All {rows.length}</button><button onClick={() => setFilter("paused")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "paused" ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F8FAFC] text-[#64748B]")}>Paused {rows.filter((row) => row.isPaused).length}</button><button onClick={() => setFilter("needs_owner")} className={cn("rounded-full px-2.5 py-1 text-[10px] font-semibold", filter === "needs_owner" ? "bg-[#FEF2F2] text-[#B91C1C]" : "bg-[#F8FAFC] text-[#64748B]")}>Needs owner {rows.filter((row) => row.needsOwner).length}</button></div></div><div className="divide-y divide-[#F1F5F9]">{conversationsQuery.isLoading ? <div className="p-5 text-xs text-[#94A3B8]">Loading live conversations…</div> : filtered.length === 0 ? <div className="p-5 text-xs text-[#94A3B8]">No live conversations match this search.</div> : filtered.map((item) => { const itemInitials = (item.profileName ?? item.waId).split(/\s+/).map((part: string) => part[0]).slice(0, 2).join("").toUpperCase(); return <button key={item.clientId} onClick={() => { if (item.clientId !== selected?.clientId) setOwnerDraft(""); setSelectedClientId(item.clientId); }} className={cn("flex w-full items-start gap-3 p-4 text-left transition", selected?.clientId === item.clientId ? "bg-[#EFF6FF]" : "hover:bg-[#FAFCFF]")}><div className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[11px] font-bold", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{itemInitials}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><p className="truncate text-xs font-semibold text-[#1E293B]">{item.profileName ?? item.waId}</p><span className="shrink-0 text-[10px] text-[#94A3B8]">{new Date(item.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span></div><p className="mt-1 truncate text-[11px] text-[#64748B]">{parseConversationMessages(item.recentMessages).at(-1)?.text ?? "No message content"}</p><span className={cn("mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", item.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#F1F5F9] text-[#64748B]")}>{item.isPaused ? "Paused by owner" : item.state.replaceAll("_", " ")}</span>{"intentScore" in item && item.intentScore && <span className={cn("ml-1.5 mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold", item.intentScore === "high" ? "bg-[#F0FDF4] text-[#15803D]" : item.intentScore === "medium" ? "bg-[#EFF6FF] text-[#1D4ED8]" : "bg-[#F1F5F9] text-[#94A3B8]")}>{item.intentScore} fit</span>}</div></button>; })}</div></section>
       <section className="webasi-card flex min-h-[600px] flex-col overflow-hidden">{selected ? <><div className="flex flex-col gap-3 border-b border-[#E2E8F0] p-4 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-center gap-3"><div className={cn("flex h-10 w-10 items-center justify-center rounded-full text-xs font-bold", selected.isPaused ? "bg-[#FFF7ED] text-[#C2410C]" : "bg-[#DBEAFE] text-[#1D4ED8]")}>{initials}</div><div><p className="text-sm font-bold text-[#1E293B]">{selected.profileName ?? selected.waId}</p><p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[#64748B]"><StatusDot color={selected.isPaused ? "#F59E0B" : "#22C55E"} />{selected.isPaused ? "Paused by owner" : "WEBASI active"} · {selected.state.replaceAll("_", " ")}</p></div></div><div className="flex items-center gap-2">{selected.isPaused ? <button onClick={resumeSelected} disabled={resume.isPending} className="webasi-button-primary min-h-9 px-3"><Play className="h-3.5 w-3.5" />{resume.isPending ? "Resuming…" : "Resume automation"}</button> : <><span className="inline-flex items-center gap-1.5 rounded-full bg-[#F0FDF4] px-2.5 py-1.5 text-[10px] font-bold text-[#15803D]"><CheckCircle2 className="h-3.5 w-3.5" />Automation active</span><button onClick={takeoverSelected} disabled={pause.isPending} className="webasi-button-secondary min-h-9 px-3"><Pause className="h-3.5 w-3.5" />{pause.isPending ? "Taking over…" : "Take over"}</button></>}</div></div><div className="flex-1 space-y-4 overflow-auto bg-[#F8FAFC] p-4 sm:p-6"><ClientInsightPanel row={selected} />{messages.length === 0 ? <div className="flex h-full items-center justify-center text-xs text-[#94A3B8]">No message history stored yet.</div> : messages.map((message, index) => <div key={"message-" + message.role + "-" + index + "-" + message.text} className={cn("flex", message.role === "assistant" ? "justify-start" : "justify-end")}><div className={cn("max-w-[82%] rounded-2xl px-4 py-3 text-sm leading-6 shadow-sm", message.role === "assistant" ? "rounded-bl-md border border-[#E2E8F0] bg-white text-[#1E293B]" : message.role === "owner" ? "rounded-br-md bg-[#0F766E] text-white" : "rounded-br-md bg-[#2563FF] text-white")}>{message.text}<span className={cn("mt-1 block text-[10px]", message.role === "assistant" ? "text-[#94A3B8]" : "text-blue-100")}>{message.role === "assistant" ? "WEBASI" : message.role === "owner" ? "You · owner" : "Client"}</span></div></div>)}<div className="flex items-center justify-center gap-2 text-[10px] text-[#94A3B8]"><span className="h-px w-10 bg-[#E2E8F0]" />Last activity {lastActivity}<span className="h-px w-10 bg-[#E2E8F0]" /></div></div><div className="border-t border-[#E2E8F0] bg-white p-4"><div className="flex items-end gap-2 rounded-xl border border-[#E2E8F0] bg-[#F8FAFC] p-2"><textarea value={ownerDraft} onChange={(event) => setOwnerDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendOwnerMessage(); } }} disabled={!selected.isPaused || ownerMessage.isPending} className="min-h-10 flex-1 resize-none bg-transparent px-2 py-1 text-xs leading-5 outline-none" placeholder={selected.isPaused ? "Type an owner reply…" : "Take over this chat to reply"} /><button onClick={sendOwnerMessage} disabled={!selected.isPaused || !ownerDraft.trim() || ownerMessage.isPending} className="webasi-button-primary min-h-9 px-3"><Send className="h-3.5 w-3.5" />{ownerMessage.isPending ? "Sending…" : "Send"}</button></div><p className="mt-2 text-[10px] text-[#94A3B8]">Owner messages send through the linked WhatsApp device and keep WEBASI paused.</p></div></> : <div className="flex flex-1 items-center justify-center p-8 text-sm text-[#64748B]">No live WhatsApp conversations yet.</div>}</section>
     </div>
   </div>;
@@ -656,7 +656,7 @@ export default function Home() {
   if (page === "/settings") return <SettingsPage />;
   if (page === "/test-chat") return <TestChatPage />;
   if (page === "/events") return <EventsPage />;
-  if (page === "/connect-whatsapp") return <ConnectWhatsApp />;
+  if (page === "/connect-whatsapp") return <Suspense fallback={null}><ConnectWhatsApp /></Suspense>;
   return <HomePage />;
 }
 

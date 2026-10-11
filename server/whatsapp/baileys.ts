@@ -49,6 +49,7 @@ class BaileysTransport {
   private status: BaileysConnectionStatus = "disconnected";
   private pairingCode: string | undefined;
   private qr: string | undefined;
+  private qrLogged = false;
   private phoneNumber: string | undefined;
   private lastError: string | undefined;
   private reconnectAttempt = 0;
@@ -75,11 +76,18 @@ class BaileysTransport {
 
   async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, qr: this.qr, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
 
+  // Whether a message could go out right now, without the database read getStatus() makes.
+  isConnected() { return Boolean(this.socket) && this.status === "connected"; }
+
   async resetSession() {
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
-    this.socket?.end(undefined);
+    // Let go of the socket before closing it: its "close" event then belongs to no current connection and is ignored,
+    // instead of scheduling a reconnect that would start a new login right after the owner cleared the session.
+    const socket = this.socket;
     this.socket = null;
+    socket?.end(undefined);
+    this.qrLogged = false;
     const reset = resetBaileysStatus();
     this.status = reset.status;
     this.lastError = reset.lastError;
@@ -112,29 +120,39 @@ class BaileysTransport {
   private async connect() {
     this.status = this.reconnectAttempt ? "reconnecting" : "connecting";
     const auth = await createDatabaseAuthState();
-    this.socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: false, syncFullHistory: false });
-    this.socket.ev.on("creds.update", (creds) => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
-    this.socket.ev.on("connection.update", (update) => this.handleConnection(update, auth).catch((error) => console.error("[Baileys] connection update failed", error)));
-    this.socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
+    const socket = makeWASocket({ auth, browser: Browsers.macOS("Chrome"), logger: pino({ level: "silent" }), markOnlineOnConnect: false, syncFullHistory: false });
+    this.socket = socket;
+    socket.ev.on("creds.update", () => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
+    socket.ev.on("connection.update", (update) => this.handleConnection(update, auth, socket).catch((error) => console.error("[Baileys] connection update failed", error)));
+    socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
     if (!auth.creds.registered) {
       this.status = "pairing";
     }
   }
 
-  private async handleConnection(update: { connection?: string; qr?: string; lastDisconnect?: { error?: unknown } }, auth: Awaited<ReturnType<typeof createDatabaseAuthState>>) {
+  private async handleConnection(update: { connection?: string; qr?: string; lastDisconnect?: { error?: unknown } }, auth: Awaited<ReturnType<typeof createDatabaseAuthState>>, socket: ReturnType<typeof makeWASocket>) {
+    // An update from a socket that was reset or replaced says nothing about the current connection.
+    if (socket !== this.socket) return;
     if (update.qr && !auth.creds.registered) {
       this.status = "pairing";
       this.qr = update.qr;
-      await recordEvent({ eventType: "baileys_qr_ready", title: "WhatsApp QR code ready", detail: "Scan the QR code to connect." });
+      // WhatsApp replaces the code about every 20 seconds for as long as nobody scans it. One log entry per pairing
+      // attempt says the same thing as one per code, without filling the event log.
+      if (!this.qrLogged) {
+        this.qrLogged = true;
+        await recordEvent({ eventType: "baileys_qr_ready", title: "WhatsApp QR code ready", detail: "Scan the QR code to connect." });
+      }
     }
     if (update.connection === "open") {
-      this.status = "connected"; this.pairingCode = undefined; this.qr = undefined; this.reconnectAttempt = 0; this.lastError = undefined;
+      this.status = "connected"; this.pairingCode = undefined; this.qr = undefined; this.qrLogged = false; this.reconnectAttempt = 0; this.lastError = undefined;
       this.phoneNumber = this.socket?.user?.id ? jidNormalizedUser(this.socket.user.id).split("@")[0] : undefined;
       await recordEvent({ eventType: "baileys_connected", title: "WhatsApp connected", detail: "The linked-device transport is connected." });
     }
     if (update.connection === "close") {
       const statusCode = baileysStatusCode(update.lastDisconnect?.error);
       this.socket = null;
+      // A code from a closed connection can no longer be scanned; the next connection brings its own.
+      this.qr = undefined;
       if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession || statusCode === DisconnectReason.forbidden) {
         this.status = "reconnect_required"; this.lastError = `session_invalidated_${statusCode}`; this.pairingCode = undefined;
         await recordEvent({ eventType: "baileys_logged_out", severity: "error", title: "WhatsApp reconnect required", detail: "The linked-device session was invalidated. Reconnect WhatsApp from the dashboard." });
@@ -210,6 +228,7 @@ class BaileysTransport {
   }
 
   async startPairing() {
+    this.qrLogged = false; // the owner asked for a code: log the next one
     await this.start();
     const deadline = Date.now() + 15000;
     while (!this.qr && Date.now() < deadline && this.status !== "reconnect_required") await sleep(250);

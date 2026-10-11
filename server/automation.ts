@@ -50,6 +50,9 @@ const parseTranscript = (raw: unknown) => { try { return (typeof raw === "string
 export async function runFollowUps(now = new Date()) {
   const settings = await getSettings();
   if (!settings.webasiEnabled || !settings.followupsEnabled || !isSendingHours(now)) return 0;
+  // Nothing can be sent while WhatsApp is disconnected. Without this check every tick spent an AI request on a draft
+  // for each quiet chat and logged a failed send, again and again until the connection came back.
+  if (ENV.whatsappTransport === "baileys" && !settings.shadowMode && !baileysTransport.isConnected()) return 0;
   const active = await getActiveProject();
   const project = active ? await compileProjectSnapshot(active.projectKey) : null;
   if (!project) return 0;

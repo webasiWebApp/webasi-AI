@@ -59,6 +59,7 @@ export async function createDatabaseAuthState(): Promise<AuthenticationState> {
       })));
     },
     async clear() {
+      knownSession = null;
       const { error } = await getSupabaseServer().from("baileys_auth_state").delete().like("state_key", `${keyPrefix}%`);
       if (error) throw new Error(`Supabase Baileys clear failed: ${error.message}`);
       await deleteState(`${prefix}creds`);
@@ -67,9 +68,23 @@ export async function createDatabaseAuthState(): Promise<AuthenticationState> {
   return { creds, keys };
 }
 
-export async function saveBaileysCreds(creds: AuthenticationState["creds"]) { await writeState(`${prefix}creds`, creds); }
-export async function hasBaileysSession() { try { return Boolean(await readState(`${prefix}creds`)); } catch { return false; } }
+// Every open dashboard tab asks for the connection status every few seconds, and each answer includes whether a
+// session is stored. Remembering that for a short while saves a database read (and a decryption) per poll.
+const SESSION_CHECK_TTL_MS = 30_000;
+let knownSession: { stored: boolean; at: number } | null = null;
+
+export async function saveBaileysCreds(creds: AuthenticationState["creds"]) { await writeState(`${prefix}creds`, creds); knownSession = { stored: true, at: Date.now() }; }
+export async function hasBaileysSession() {
+  if (knownSession && Date.now() - knownSession.at < SESSION_CHECK_TTL_MS) return knownSession.stored;
+  try {
+    const stored = Boolean(await readState(`${prefix}creds`));
+    knownSession = { stored, at: Date.now() };
+    return stored;
+  } catch { return false; }
+}
 export async function clearBaileysSession() {
+  knownSession = null;
   const { error } = await getSupabaseServer().from("baileys_auth_state").delete().like("state_key", `${prefix}%`);
   if (error) throw new Error(`Supabase Baileys clear failed: ${error.message}`);
+  knownSession = { stored: false, at: Date.now() };
 }

@@ -38,9 +38,9 @@ const menuItems = [
   { icon: FolderKanban, label: "Projects", path: "/projects" },
   { icon: Sparkles, label: "Training", path: "/training" },
   { icon: Bot, label: "Test Chat", path: "/test-chat" },
-  { icon: MessagesSquare, label: "Conversations", path: "/conversations", badge: "4" },
+  { icon: MessagesSquare, label: "Conversations", path: "/conversations" },
   { icon: Smartphone, label: "Connect WhatsApp", path: "/connect-whatsapp" },
-  { icon: PackageCheck, label: "Orders", path: "/orders", badge: "2" },
+  { icon: PackageCheck, label: "Orders", path: "/orders" },
   { icon: BarChart3, label: "Insights", path: "/insights" },
   { icon: Settings, label: "Settings", path: "/settings" },
   { icon: FileClock, label: "Event Log", path: "/events" },
@@ -111,7 +111,6 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
                   >
                     <item.icon className={`h-[17px] w-[17px] shrink-0 ${isActive ? "text-[#2563FF]" : "text-[#94A3B8]"}`} />
                     <span className="flex-1">{item.label}</span>
-                    {item.badge && <span className={`rounded-full px-1.5 py-0.5 text-[10px] font-bold group-data-[collapsible=icon]:hidden ${isActive ? "bg-[#DBEAFE] text-[#1D4ED8]" : "bg-[#F1F5F9] text-[#64748B]"}`}>{item.badge}</span>}
                   </SidebarMenuButton>
                 </SidebarMenuItem>
               );

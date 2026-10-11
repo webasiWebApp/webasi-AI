@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { conversations, usageCounters, whatsappMessages } from "../drizzle/schema";
 import { ENV } from "./_core/env";
@@ -93,15 +93,18 @@ export async function getConversation(clientId: string, waId: string, profileNam
   };
 }
 
+// The pause flag is deliberately not written here. A turn can take many seconds (the AI, then the typing delay), and
+// writing back the value read at the start would undo a takeover the owner made from the dashboard in the meantime.
+// Only pauseConversation, pauseConversationByWaId and resumeConversation change it.
 export async function saveConversation(snapshot: ConversationSnapshot): Promise<void> {
   if (useSupabase()) {
-    const { error } = await getSupabaseServer().from("conversations").update({ wa_id: snapshot.waId, profile_name: snapshot.profileName ?? null, state: snapshot.state, is_paused: snapshot.isPaused, missing_fields: snapshot.missingFields, extracted_fields: snapshot.extractedFields, recent_messages: snapshot.recentMessages, last_client_message_at: snapshot.lastClientMessageAt?.toISOString() ?? null, intent_score: snapshot.intentScore ?? null, handed_over: snapshot.handedOver ?? false, sentiment: snapshot.sentiment ?? null, objection: snapshot.objection ?? null, language: snapshot.language ?? null, client_notes: snapshot.clientNotes ?? "", updated_at: new Date().toISOString() }).eq("client_id", snapshot.clientId);
+    const { error } = await getSupabaseServer().from("conversations").update({ wa_id: snapshot.waId, profile_name: snapshot.profileName ?? null, state: snapshot.state, missing_fields: snapshot.missingFields, extracted_fields: snapshot.extractedFields, recent_messages: snapshot.recentMessages, last_client_message_at: snapshot.lastClientMessageAt?.toISOString() ?? null, intent_score: snapshot.intentScore ?? null, handed_over: snapshot.handedOver ?? false, sentiment: snapshot.sentiment ?? null, objection: snapshot.objection ?? null, language: snapshot.language ?? null, client_notes: snapshot.clientNotes ?? "", updated_at: new Date().toISOString() }).eq("client_id", snapshot.clientId);
     if (error) throw error;
     return;
   }
   const db = await getDb();
   if (!db) return;
-  await db.update(conversations).set({ waId: snapshot.waId, profileName: snapshot.profileName ?? null, state: snapshot.state, isPaused: snapshot.isPaused ? 1 : 0, missingFields: JSON.stringify(snapshot.missingFields), extractedFields: JSON.stringify(snapshot.extractedFields), recentMessages: JSON.stringify(snapshot.recentMessages), lastClientMessageAt: snapshot.lastClientMessageAt ?? null }).where(eq(conversations.clientId, snapshot.clientId));
+  await db.update(conversations).set({ waId: snapshot.waId, profileName: snapshot.profileName ?? null, state: snapshot.state, missingFields: JSON.stringify(snapshot.missingFields), extractedFields: JSON.stringify(snapshot.extractedFields), recentMessages: JSON.stringify(snapshot.recentMessages), lastClientMessageAt: snapshot.lastClientMessageAt ?? null }).where(eq(conversations.clientId, snapshot.clientId));
 }
 
 function currentPeriodKey(date = new Date()) { return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`; }
