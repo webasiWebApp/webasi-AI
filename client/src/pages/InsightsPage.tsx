@@ -1,0 +1,37 @@
+import { useState } from "react";
+import { toast } from "sonner";
+import { trpc } from "@/lib/trpc";
+import { AlertCircle, Check, MessageSquareText, Send, Sparkles, TrendingUp } from "lucide-react";
+import { cn, PageHeader, MetricCard } from "@/components/dashboard/shared";
+
+export default function InsightsPage() {
+  const insightsQuery = trpc.dashboard.insights.useQuery(undefined, { retry: false });
+  const conversationsQuery = trpc.dashboard.conversations.useQuery(undefined, { retry: false });
+  const analyze = trpc.insights.analyze.useMutation({ onSuccess: () => { insightsQuery.refetch(); conversationsQuery.refetch(); toast.success("Analysis complete", { description: "Suggestions were generated for review only." }); }, onError: (error) => toast.error(error.message) });
+  const approve = trpc.insights.approve.useMutation({ onSuccess: () => { insightsQuery.refetch(); toast.success("Suggestion approved", { description: "Learned answers are added to the active project's FAQs; other suggestions are notes for your training." }); }, onError: (error) => toast.error(error.message) });
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const dismiss = trpc.insights.dismiss.useMutation({ onSuccess: () => { insightsQuery.refetch(); toast.success("Suggestion dismissed"); }, onError: (error) => toast.error(error.message) });
+  const rows = insightsQuery.data ?? [];
+  const conversations = conversationsQuery.data ?? [];
+  // The conversation list carries these counts per chat, so the transcripts themselves are not downloaded here.
+  const sum = (field: "messageCount" | "questionCount" | "singlishCount") => conversations.reduce((total: number, row) => total + (row[field] ?? 0), 0);
+  const messageCount = sum("messageCount");
+  const questions = sum("questionCount");
+  const escalations = conversations.filter((row) => row.needsOwner).length;
+  const singlish = sum("singlishCount");
+  const color = (category: string) => category === "Learned answer" ? "bg-[#F0FDF4] text-[#15803D]" : category === "Handover" ? "bg-[#FEF2F2] text-[#B91C1C]" : category === "Objection" ? "bg-[#FFF7ED] text-[#F59E0B]" : category === "Language" ? "bg-[#F5F3FF] text-[#7C3AED]" : "bg-[#EFF6FF] text-[#2563FF]";
+  return <div className="mx-auto max-w-[1440px] px-4 pb-12 pt-6 sm:px-6 lg:px-8 lg:pt-9"><PageHeader eyebrow="Workspace / Insights" title="Insights" description="Spot recurring questions and drop-off patterns. Suggestions never change your knowledge automatically." action={<button onClick={() => analyze.mutate()} disabled={analyze.isPending} className="webasi-button-primary"><Sparkles className={cn("h-4 w-4", analyze.isPending && "animate-pulse")} />{analyze.isPending ? "Analyzing…" : "Run analysis"}</button>} /><div className="mb-5 grid gap-4 sm:grid-cols-3"><MetricCard label="Questions analyzed" value={String(questions)} detail={`Last ${conversations.length} conversations`} icon={MessageSquareText} /><MetricCard label="Escalations" value={String(escalations)} detail={conversations.length ? `${Math.round((escalations / conversations.length) * 100)}% of conversations` : "No live conversations"} icon={AlertCircle} tone="amber" /><MetricCard label="Language mix" value={`${Math.max(messageCount - singlish, 0)} / ${singlish}`} detail="English / Singlish markers" icon={TrendingUp} tone="violet" /></div><WeeklySummaryCard /><section className="webasi-card overflow-hidden"><div className="border-b border-[#E2E8F0] p-5"><div className="flex items-center gap-2"><div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[#EFF6FF] text-[#2563FF]"><Sparkles className="h-4 w-4" /></div><div><h2 className="text-base font-bold text-[#0F172A]">Suggestions for your project</h2><p className="mt-1 text-xs text-[#94A3B8]">Generated from recent conversations. Review each suggestion before approval.</p></div></div></div><div className="divide-y divide-[#F1F5F9]">{insightsQuery.isLoading ? <div className="p-6 text-xs text-[#94A3B8]">Loading persisted insights…</div> : rows.length === 0 ? <div className="p-6 text-xs text-[#94A3B8]">No suggestions yet. Run analysis to inspect recent conversations.</div> : rows.map((insight) => <div key={insight.id} className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="flex items-start gap-3"><div className={cn("mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", color(insight.category))}><MessageSquareText className="h-4 w-4" /></div><div><div className="flex flex-wrap items-center gap-2"><p className="text-sm font-semibold text-[#1E293B]">{insight.title}</p><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", color(insight.category))}>{insight.category}</span><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-bold", insight.status === "approved" ? "bg-[#DCFCE7] text-[#15803D]" : "bg-[#F1F5F9] text-[#64748B]")}>{insight.status}</span></div>{insight.category === "Learned answer" && insight.status === "suggested" ? <textarea aria-label="Edit answer before adding it" value={drafts[insight.id] ?? insight.detail} onChange={(event) => setDrafts((items) => ({ ...items, [insight.id]: event.target.value }))} rows={4} className="mt-2 w-full min-w-[260px] rounded-lg border border-[#E2E8F0] bg-white p-2 text-xs leading-5 text-[#1E293B] outline-none focus:border-[#2563FF] sm:min-w-[420px]" /> : <p className="mt-1.5 whitespace-pre-line text-xs text-[#64748B]">{insight.detail}</p>}</div></div><div className="flex shrink-0 gap-2"><button onClick={() => approve.mutate({ id: insight.id, detail: drafts[insight.id] })} disabled={insight.status === "approved" || approve.isPending} className={cn("webasi-button min-h-9 shrink-0 px-3", insight.status === "approved" ? "border border-[#BBF7D0] bg-[#F0FDF4] text-[#15803D]" : "webasi-button-primary")}>{insight.status === "approved" ? <><Check className="h-3.5 w-3.5" />Approved</> : insight.category === "Learned answer" ? "Add to knowledge base" : "Approve"}</button>{insight.status !== "approved" && <button onClick={() => dismiss.mutate({ id: insight.id })} disabled={dismiss.isPending} className="webasi-button-secondary min-h-9 shrink-0 px-3">Dismiss</button>}</div></div>)}</div></section></div>;
+}
+
+// Preview of the Monday WhatsApp summary, with a manual send.
+function WeeklySummaryCard() {
+  const summary = trpc.summary.weekly.useQuery(undefined, { retry: false });
+  const send = trpc.summary.sendWeekly.useMutation({ onSuccess: ({ delivered }) => delivered ? toast.success("Summary sent to your WhatsApp") : toast.error("Not delivered — is WhatsApp connected?"), onError: (error) => toast.error(error.message) });
+  return <section className="webasi-card mb-5 p-5">
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <div><h2 className="text-base font-bold text-[#0F172A]">Weekly summary</h2><p className="mt-1 text-xs text-[#94A3B8]">Last 7 days. Sent automatically to your WhatsApp every Monday at 9am.</p></div>
+      <button onClick={() => send.mutate()} disabled={send.isPending || !summary.data?.text} className="webasi-button-secondary min-h-9 shrink-0 px-3"><Send className="h-3.5 w-3.5" />{send.isPending ? "Sending…" : "Send now"}</button>
+    </div>
+    <p className="mt-4 whitespace-pre-line rounded-lg bg-[#F8FAFC] p-4 text-xs leading-6 text-[#1E293B]">{summary.isLoading ? "Loading…" : summary.data?.text ?? "The weekly summary needs the Supabase database."}</p>
+  </section>;
+}

@@ -93,6 +93,78 @@ describe("owner messages from the dashboard", () => {
   });
 });
 
+describe("conversation lists and the open chat", () => {
+  it("lists chats with their last message only, and reads the full transcript for one chat", async () => {
+    db.seed("settings", {}).seed("conversations", chat({ recent_messages: [{ role: "client", text: "How much?" }, { role: "assistant", text: "It depends on what you need." }] }));
+    const [row] = await api.dashboard.conversations();
+    expect(row).toMatchObject({ clientId: "c1", messageCount: 2, lastMessage: { role: "assistant", text: "It depends on what you need." } });
+    expect(row).not.toHaveProperty("recentMessages");
+    expect((await api.dashboard.overview()).conversations[0]).not.toHaveProperty("recentMessages");
+    expect(JSON.parse((await api.conversations.get({ clientId: "c1" }))!.recentMessages)).toHaveLength(2);
+    expect(await api.conversations.get({ clientId: "missing" })).toBeNull();
+  });
+});
+
+describe("shadow drafts through the API", () => {
+  const seedDraft = () => {
+    db.seed("settings", {}).seed("projects", { project_key: "mine", name: "Mine", status: "active" }).seed("conversations", chat({ recent_messages: [{ role: "client", text: "How much?" }] }));
+    db.seed("insights", { title: "How much?", detail: "It depends on what you need.", category: "Shadow draft", status: "suggested", client_id: "c1" });
+    return db.rows("insights")[0].id as string;
+  };
+
+  it("sends a draft as written: delivered, added to the chat, counted, and no longer waiting", async () => {
+    const id = seedDraft();
+    expect(await api.shadowDrafts.list()).toMatchObject([{ id, clientName: "Nimal", clientMessage: "How much?", draft: "It depends on what you need." }]);
+    expect(await api.shadowDrafts.send({ id })).toEqual({ accepted: true, messageId: "wamid.owner-1" });
+
+    expect(world.sendText).toHaveBeenCalledWith({ to: "94770001111", body: "It depends on what you need." });
+    expect(db.rows("conversations")[0].recent_messages.at(-1)).toMatchObject({ role: "assistant", text: "It depends on what you need." });
+    expect(db.rows("conversations")[0].is_paused).toBe(false);
+    expect(db.rows("usage_counters").find((row) => row.period_key === thisMonth)?.outbound_whatsapp).toBe(1);
+    expect(db.rows("messages")[0]).toMatchObject({ role: "assistant", topic: "shadow_draft" });
+    expect(db.rows("insights")[0].status).toBe("approved");
+    expect(await api.shadowDrafts.list()).toEqual([]);
+  });
+
+  it("sends the owner's wording when the draft was edited, and records what went out", async () => {
+    const id = seedDraft();
+    await api.shadowDrafts.send({ id, text: "  It starts at LKR 60,000.  " });
+    expect(world.sendText).toHaveBeenCalledWith({ to: "94770001111", body: "It starts at LKR 60,000." });
+    expect(db.rows("insights")[0]).toMatchObject({ status: "approved", detail: "It starts at LKR 60,000." });
+    expect(db.rows("event_log").find((row) => row.event_type === "shadow_draft_sent")?.title).toBe("Draft sent after editing");
+  });
+
+  it("puts the draft back, unchanged, when WhatsApp does not accept it", async () => {
+    const id = seedDraft();
+    world.sendText.mockResolvedValue({ accepted: false, reason: "baileys_not_connected" });
+    expect(await api.shadowDrafts.send({ id, text: "Edited wording" })).toEqual({ accepted: false, reason: "baileys_not_connected" });
+    expect(await api.shadowDrafts.list()).toMatchObject([{ id, draft: "It depends on what you need." }]);
+    expect(db.rows("usage_counters")).toHaveLength(0);
+    expect(db.rows("conversations")[0].recent_messages).toHaveLength(1);
+  });
+
+  it("is sent at most once however often Send is pressed, and is held back by the monthly limit", async () => {
+    const id = seedDraft();
+    const results = await Promise.all([api.shadowDrafts.send({ id }), api.shadowDrafts.send({ id })]);
+    expect(results.filter((result) => result.accepted)).toHaveLength(1);
+    expect(world.sendText).toHaveBeenCalledOnce();
+
+    db.seed("insights", { title: "And the timeline?", detail: "About two weeks.", category: "Shadow draft", status: "suggested", client_id: "c1" });
+    db.rows("usage_counters").find((row) => row.period_key === thisMonth)!.outbound_whatsapp = 810;
+    const second = db.rows("insights")[1].id as string;
+    expect(await api.shadowDrafts.send({ id: second })).toEqual({ accepted: false, reason: "whatsapp_usage_hard_stop" });
+    expect(await api.shadowDrafts.list()).toHaveLength(1);
+  });
+
+  it("discards a draft without sending anything", async () => {
+    const id = seedDraft();
+    expect(await api.shadowDrafts.discard({ id })).toBe(true);
+    expect(await api.shadowDrafts.discard({ id })).toBe(false);
+    expect(await api.shadowDrafts.send({ id })).toEqual({ accepted: false, reason: "draft_not_found" });
+    expect(world.sendText).not.toHaveBeenCalled();
+  });
+});
+
 describe("test chat sandbox", () => {
   const seedProject = (status: string, approved: boolean) => db.seed("settings", {}).seed("projects", { project_key: "mine", name: "Mine", status, readiness: approved ? 100 : 40, snapshot: { name: "Mine" } }).seed("training_sessions", { project_key: "mine", answers, summary: "Summary", approved });
   const turn = (incomingText: string) => api.testChat.turn({ projectKey: "mine", incomingText, recentMessages: [] });

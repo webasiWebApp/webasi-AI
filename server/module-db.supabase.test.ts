@@ -151,6 +151,14 @@ describe("project lifecycle", () => {
     expect([statusOf("old"), statusOf("new")]).toEqual(["active", "approved"]);
   });
 
+  it("switches projects in one database step when its function is installed", async () => {
+    db.seed("settings", {}).seed("projects", project("old", "active"), project("new", "approved"));
+    db.rpcHandlers.activate_project = ({ p_project_key }) => { for (const row of db.rows("projects")) row.status = row.project_key === p_project_key ? "active" : "approved"; };
+    await expect(moduleDb.activateProject("new")).resolves.toBe(true);
+    expect([statusOf("old"), statusOf("new")]).toEqual(["approved", "active"]);
+    expect(db.calls.filter((call) => call.table === "projects" && call.action === "update")).toHaveLength(0);
+  });
+
   it("activates one project at a time", async () => {
     db.seed("settings", {}).seed("projects", project("old", "active"), project("new", "approved"), project("draft", "training", { readiness: 20 }));
     await expect(moduleDb.activateProject("new")).resolves.toBe(true);
@@ -201,20 +209,67 @@ describe("orders", () => {
 describe("conversations", () => {
   const chat = (extra: Record<string, unknown> = {}) => ({ client_id: "c1", wa_id: "94770001111", profile_name: "Nimal", state: "collecting", ...extra });
 
-  it("a reply that was being written does not undo a takeover the owner made in the meantime", async () => {
+  it("a reply that was being written does not undo a takeover, or overwrite a message, that arrived in the meantime", async () => {
     db.seed("conversations", chat());
     const snapshot = await conversationsDb.getConversation("c1", "94770001111");
     await moduleDb.pauseConversation("c1");
-    snapshot.recentMessages = [{ role: "client", text: "hello" }];
+    await moduleDb.recordOwnerMessageByWaId("94770001111", "I'll take this one.");
+    snapshot.recentMessages = [{ role: "client", text: "the copy the turn read when it started" }];
+    snapshot.intentScore = "high";
     await conversationsDb.saveConversation(snapshot);
-    expect(db.rows("conversations")[0]).toMatchObject({ is_paused: true, recent_messages: [{ role: "client", text: "hello" }] });
+    expect(db.rows("conversations")[0]).toMatchObject({ is_paused: true, intent_score: "high", recent_messages: [{ role: "owner", text: "I'll take this one." }] });
+  });
+
+  it("adds to the transcript one message at a time and keeps the last 20", async () => {
+    db.seed("conversations", chat({ recent_messages: Array.from({ length: 19 }, (_, index) => ({ role: "client", text: `message ${index}` })) }));
+    await conversationsDb.appendTranscriptMessage("c1", { role: "client", text: "question" });
+    await conversationsDb.appendTranscriptMessage("c1", { role: "assistant", text: "answer" });
+    const stored = db.rows("conversations")[0].recent_messages;
+    expect(stored).toHaveLength(20);
+    expect(stored.slice(-2).map((message: { text: string }) => message.text)).toEqual(["question", "answer"]);
+  });
+
+  it("lets the database add the message in one step when its function is installed", async () => {
+    db.seed("conversations", chat());
+    const received: unknown[] = [];
+    db.rpcHandlers.append_conversation_message = (args) => { received.push(args); };
+    await conversationsDb.appendTranscriptMessage("c1", { role: "client", text: "hi" });
+    expect(received).toEqual([{ p_client_id: "c1", p_message: { role: "client", text: "hi" }, p_limit: 20 }]);
+    expect(db.calls.filter((call) => call.table === "conversations")).toHaveLength(0);
   });
 
   it("records a dashboard takeover once, not for every message the owner then sends", async () => {
     db.seed("conversations", chat());
     await moduleDb.pauseConversation("c1");
     await moduleDb.pauseConversation("c1");
-    expect(db.rows("event_log").filter((row) => row.event_type === "dashboard_takeover")).toHaveLength(1);
+    expect(db.rows("conversations")[0].is_paused).toBe(true);
+    const takeovers = db.rows("event_log").filter((row) => row.event_type === "dashboard_takeover");
+    expect(takeovers).toHaveLength(1);
+    expect(takeovers[0]).toMatchObject({ title: "Conversation taken over", client_id: "c1" });
+  });
+
+  it("handing a chat back lifts both the owner's pause and the handover", async () => {
+    db.seed("conversations", chat({ is_paused: true, handed_over: true }));
+    await expect(moduleDb.resumeConversation("c1")).resolves.toBe(true);
+    expect(db.rows("conversations")[0]).toMatchObject({ is_paused: false, handed_over: false });
+  });
+
+  it("keeps one copy of an owner message that the phone echoes back", async () => {
+    db.seed("conversations", chat({ recent_messages: [{ role: "owner", text: "Hello" }] }));
+    await expect(moduleDb.recordOwnerMessageByWaId("94770001111", " Hello ")).resolves.toBe(true);
+    expect(db.rows("conversations")[0].recent_messages).toEqual([{ role: "owner", text: "Hello" }]);
+    await expect(moduleDb.recordOwnerMessageByWaId("94779990000", "Hello")).resolves.toBe(false);
+  });
+
+  it("lists chats for the dashboard without their transcripts", async () => {
+    db.seed("conversations", chat({ handed_over: true, recent_messages: [{ role: "client", text: "price kiyada?" }, { role: "assistant", text: "It depends on what you need. " + "x".repeat(400) }] }));
+    const [summary] = await moduleDb.listConversationSummaries();
+    expect(summary).toMatchObject({ clientId: "c1", profileName: "Nimal", needsOwner: true, messageCount: 2, questionCount: 1, singlishCount: 1 });
+    expect(summary.lastMessage).toMatchObject({ role: "assistant" });
+    expect(summary.lastMessage?.text).toHaveLength(200);
+    expect(summary).not.toHaveProperty("recentMessages");
+    expect(summary).not.toHaveProperty("recent_messages");
+    expect(JSON.parse((await moduleDb.getConversationByClientId("c1"))!.recentMessages)).toHaveLength(2);
   });
 
   it("keeps the last 20 messages when the owner replies, like every other writer of the transcript", async () => {
@@ -245,6 +300,53 @@ describe("conversations", () => {
     await conversationsDb.incrementUsage("outboundWhatsApp", day);
     expect(await conversationsDb.getUsageCounts(day)).toEqual({ outboundWhatsApp: 1, geminiRequests: 2 });
     expect(db.rows("usage_counters").map((row) => row.period_key).sort()).toEqual(["2026-10", "2026-10-11"]);
+  });
+});
+
+describe("shadow drafts", () => {
+  const chatRow = { client_id: "c1", wa_id: "94770001111", profile_name: "Nimal", state: "collecting" };
+
+  it("keeps the newest draft per client next to the message it answers", async () => {
+    db.seed("conversations", chatRow);
+    await moduleDb.saveShadowDraft({ clientId: "c1", clientMessage: "How much?", draft: "It depends on what you need." });
+    await moduleDb.saveShadowDraft({ clientId: "c1", clientMessage: "And how long?", draft: "About two weeks." });
+    await moduleDb.saveShadowDraft({ clientId: "c2", clientMessage: "Hi", draft: "Hello!" });
+    const waiting = await moduleDb.listShadowDrafts();
+    expect(waiting.map((draft) => [draft.clientId, draft.clientMessage, draft.draft, draft.clientName])).toEqual([["c2", "Hi", "Hello!", null], ["c1", "And how long?", "About two weeks.", "Nimal"]]);
+    expect(db.rows("insights").map((row) => row.status)).toEqual(["dismissed", "suggested", "suggested"]);
+  });
+
+  it("stays off the Insights page and out of the analysis clean-up", async () => {
+    await moduleDb.saveShadowDraft({ clientId: "c1", clientMessage: "How much?", draft: "It depends." });
+    expect(await moduleDb.listInsights()).toEqual([]);
+    await moduleDb.analyzeInsights();
+    expect(await moduleDb.listShadowDrafts()).toHaveLength(1);
+  });
+
+  it("can be settled only once, and put back when sending failed", async () => {
+    await moduleDb.saveShadowDraft({ clientId: "c1", clientMessage: "How much?", draft: "It depends." });
+    const [{ id }] = await moduleDb.listShadowDrafts();
+    const results = await Promise.all([moduleDb.settleShadowDraft(id, "approved", "It depends on the pages."), moduleDb.settleShadowDraft(id, "dismissed")]);
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await moduleDb.getShadowDraft(id)).toBeNull();
+    await moduleDb.restoreShadowDraft(id, "It depends.");
+    expect(await moduleDb.getShadowDraft(id)).toMatchObject({ clientId: "c1", clientMessage: "How much?", draft: "It depends." });
+  });
+});
+
+describe("event log housekeeping", () => {
+  const event = (title: string, createdAt: string, extra: Record<string, unknown> = {}) => ({ event_type: "handover_reminder", title, detail: "", created_at: createdAt, ...extra });
+
+  it("deletes only the rows older than the cutoff and says how many", async () => {
+    db.seed("event_log", event("old", "2026-01-01T00:00:00.000Z"), event("new", "2026-10-10T00:00:00.000Z"));
+    expect(await moduleDb.deleteOlderThan("event_log", new Date("2026-06-01T00:00:00.000Z"))).toBe(1);
+    expect(db.rows("event_log").map((row) => row.title)).toEqual(["new"]);
+    expect(await moduleDb.deleteOlderThan("messages", new Date("2026-06-01T00:00:00.000Z"))).toBe(0);
+  });
+
+  it("finds the events of one kind since a point in time, newest first", async () => {
+    db.seed("event_log", event("too old", "2026-10-01T00:00:00.000Z", { client_id: "c1" }), event("first", "2026-10-09T00:00:00.000Z", { client_id: "c1" }), event("second", "2026-10-10T00:00:00.000Z", { client_id: "c2" }), { ...event("other kind", "2026-10-10T00:00:00.000Z"), event_type: "escalation" });
+    expect(await moduleDb.eventsSince("handover_reminder", new Date("2026-10-05T00:00:00.000Z"))).toEqual([{ clientId: "c2", createdAt: "2026-10-10T00:00:00.000Z" }, { clientId: "c1", createdAt: "2026-10-09T00:00:00.000Z" }]);
   });
 });
 

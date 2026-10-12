@@ -1,10 +1,10 @@
 import { ENV } from "./_core/env";
 import { notifyOwner } from "./_core/notification";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { compileProjectSnapshot, getActiveProject, getSettings, getWeeklyStats, lastEventAt, listConversations, recordEvent, recordFollowUp, type WeeklyStats } from "./module-db";
+import { compileProjectSnapshot, deleteOlderThan, eventsSince, getActiveProject, getSettings, getWeeklyStats, lastEventAt, listConversations, recordEvent, recordFollowUp, type WeeklyStats } from "./module-db";
 import { draftFollowUp, modelForProvider } from "./conversations/engine";
-import { createWhatsAppSender, outboundCapAllows } from "./conversations/sender";
-import { baileysTransport } from "./whatsapp/baileys";
+import { outboundCapAllows } from "./conversations/sender";
+import { canSendWhatsApp, sendWhatsAppText } from "./whatsapp/outbound";
 import type { OrderState } from "../shared/webasi";
 
 export const FOLLOW_UP_AFTER_HOURS = 6;
@@ -52,11 +52,10 @@ export async function runFollowUps(now = new Date()) {
   if (!settings.webasiEnabled || !settings.followupsEnabled || !isSendingHours(now)) return 0;
   // Nothing can be sent while WhatsApp is disconnected. Without this check every tick spent an AI request on a draft
   // for each quiet chat and logged a failed send, again and again until the connection came back.
-  if (ENV.whatsappTransport === "baileys" && !settings.shadowMode && !baileysTransport.isConnected()) return 0;
+  if (!settings.shadowMode && !canSendWhatsApp()) return 0;
   const active = await getActiveProject();
   const project = active ? await compileProjectSnapshot(active.projectKey) : null;
   if (!project) return 0;
-  const send = ENV.whatsappTransport === "baileys" ? (input: { to: string; body: string; humanize?: boolean }) => baileysTransport.sendText(input) : createWhatsAppSender();
   let sent = 0;
   for (const chat of await listConversations()) {
     const recentMessages = parseTranscript(chat.recentMessages);
@@ -73,7 +72,7 @@ export async function runFollowUps(now = new Date()) {
       await recordFollowUp(chat.clientId, null, now);
       continue;
     }
-    const result = await send({ to: chat.waId, body: text, humanize: true });
+    const result = await sendWhatsAppText({ to: chat.waId, body: text, humanize: true });
     if (!result.accepted) { await recordEvent({ eventType: "send_failed", severity: "error", title: "Follow-up not delivered", detail: result.reason ?? "unknown error", clientId: chat.clientId }); continue; }
     for (let part = 0; part < (result.parts ?? 1); part++) await incrementUsage("outboundWhatsApp");
     await recordFollowUp(chat.clientId, text, now);
@@ -82,6 +81,68 @@ export async function runFollowUps(now = new Date()) {
     sent++;
   }
   return sent;
+}
+
+// A client waits on the owner when WEBASI will not answer the chat (handed over, or paused by the owner) and the
+// client spoke last. After three days a reminder is no longer news, so the wait is left to the weekly summary.
+export const WAITING_REMINDER_MAX_HOURS = 72;
+export type WaitingCandidate = { isPaused: boolean; handedOver?: boolean; needsOwner?: boolean; lastClientMessageAt?: Date | string | null; recentMessages: Array<{ role: string; text?: string }> };
+export function waitingOnOwner(chat: WaitingCandidate, now: Date, afterHours: number) {
+  if (!(chat.isPaused || chat.handedOver || chat.needsOwner)) return false;
+  if (!chat.lastClientMessageAt || chat.recentMessages.at(-1)?.role !== "client") return false;
+  const hours = (now.getTime() - new Date(chat.lastClientMessageAt).getTime()) / 3_600_000;
+  return hours >= afterHours && hours <= WAITING_REMINDER_MAX_HOURS;
+}
+
+// One reminder per wait: the owner is told once that a client has been waiting, and again only if the client writes
+// again and waits again. Sent to the owner's own WhatsApp chat like every other alert, at civil hours.
+export async function runHandoverReminders(now = new Date()) {
+  const afterHours = ENV.handoverReminderHours;
+  if (afterHours <= 0 || !isSendingHours(now)) return 0;
+  const waiting = (await listConversations())
+    .map((chat) => ({ chat, messages: parseTranscript(chat.recentMessages) }))
+    .filter(({ chat, messages }) => waitingOnOwner({ ...chat, recentMessages: messages }, now, afterHours));
+  if (waiting.length === 0) return 0;
+
+  const reminded = new Map<string, number>();
+  for (const event of await eventsSince("handover_reminder", new Date(now.getTime() - (WAITING_REMINDER_MAX_HOURS + 24) * 3_600_000))) {
+    if (event.clientId && !reminded.has(event.clientId)) reminded.set(event.clientId, new Date(event.createdAt).getTime());
+  }
+  const due = waiting.filter(({ chat }) => (reminded.get(chat.clientId) ?? 0) < new Date(chat.lastClientMessageAt).getTime());
+  if (due.length === 0) return 0;
+
+  const waitedHours = (chat: { lastClientMessageAt: string }) => Math.max(1, Math.round((now.getTime() - new Date(chat.lastClientMessageAt).getTime()) / 3_600_000));
+  const lines = due.map(({ chat, messages }) => `• ${chat.profileName ?? chat.waId}, waiting about ${waitedHours(chat)} h: "${(messages.at(-1)?.text ?? "").slice(0, 120)}"`);
+  const delivered = await notifyOwner({
+    title: due.length === 1 ? "WEBASI: a client is still waiting for you" : `WEBASI: ${due.length} clients are still waiting for you`,
+    content: `${lines.join("\n")}\nWEBASI is not replying in ${due.length === 1 ? "this chat" : "these chats"}. Reply yourself, or hand ${due.length === 1 ? "it" : "them"} back from Conversations.`,
+  });
+  // Not delivered (WhatsApp is down): nothing is marked as reminded, so the next run tries again.
+  if (!delivered) return 0;
+  for (const { chat } of due) await recordEvent({ eventType: "handover_reminder", severity: "warning", title: "Reminder sent: a client is waiting", detail: `${chat.profileName ?? "A client"} has been waiting about ${waitedHours(chat)} h for a reply from you.`, clientId: chat.clientId });
+  return due.length;
+}
+
+// The shortest history the server itself relies on: duplicate detection and the weekly summary read recent messages,
+// and reminders and the summary schedule read recent events. A configured period below these is raised to them.
+const RETENTION_FLOOR_DAYS = { event_log: 14, messages: 30 } as const;
+
+// Deletes old event-log entries and logged messages, once a day, and only when a retention period is configured.
+export async function runRetention(now = new Date()) {
+  const periods = { event_log: ENV.eventLogRetentionDays, messages: ENV.messageRetentionDays };
+  if (periods.event_log <= 0 && periods.messages <= 0) return null;
+  const last = await lastEventAt("retention_cleanup");
+  if (last && now.getTime() - last.getTime() < 24 * 3_600_000) return null;
+  const removed = { event_log: 0, messages: 0 };
+  const kept: string[] = [];
+  for (const table of ["event_log", "messages"] as const) {
+    if (periods[table] <= 0) continue;
+    const days = Math.max(periods[table], RETENTION_FLOOR_DAYS[table]);
+    removed[table] = await deleteOlderThan(table, new Date(now.getTime() - days * 86_400_000));
+    kept.push(`${removed[table]} ${table === "event_log" ? "event-log entries" : "logged messages"} older than ${days} days`);
+  }
+  await recordEvent({ eventType: "retention_cleanup", title: "Old records removed", detail: `Removed ${kept.join(" and ")}.` });
+  return removed;
 }
 
 const lkr = (value: number) => `LKR ${value.toLocaleString("en-LK")}`;
@@ -123,6 +184,8 @@ export function weeklySummaryDue(now: Date, lastSentAt: Date | null) {
 
 async function tick() {
   try { await runFollowUps(); } catch (error) { console.error("[Automation] follow-ups failed", error instanceof Error ? error.message : error); }
+  try { await runHandoverReminders(); } catch (error) { console.error("[Automation] waiting-client reminders failed", error instanceof Error ? error.message : error); }
+  try { await runRetention(); } catch (error) { console.error("[Automation] retention failed", error instanceof Error ? error.message : error); }
   try {
     const settings = await getSettings();
     if (settings.weeklySummaryEnabled && weeklySummaryDue(new Date(), await lastEventAt("weekly_summary"))) await sendWeeklySummary();

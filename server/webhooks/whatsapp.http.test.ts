@@ -51,6 +51,18 @@ describe("Meta webhook endpoint", () => {
     expect(received[0]).toMatchObject({ id: "wamid.1", waId: "94770001111", profileName: "Nimal" });
   });
 
+  it("handles one client's messages in the order they came, and different clients side by side", async () => {
+    const log: string[] = [];
+    const finish = new Map<string, () => void>();
+    const enqueue = vi.fn((message: ParsedWhatsAppMessage) => new Promise<void>((resolve) => { log.push(`start ${message.id}`); finish.set(message.id, () => { log.push(`end ${message.id}`); resolve(); }); }));
+    const url = await serve({ verifyToken: "v", appSecret: "secret", enqueue });
+    const body = JSON.stringify({ object: "whatsapp_business_account", entry: [{ id: "waba", changes: [{ field: "messages", value: { messages: [{ id: "a1", from: "94770001111", type: "text", text: { body: "one" } }, { id: "a2", from: "94770001111", type: "text", text: { body: "two" } }, { id: "b1", from: "94770002222", type: "text", text: { body: "hi" } }] } }] }] });
+    expect((await fetch(url, { method: "POST", headers: { "content-type": "application/json", "x-hub-signature-256": sign(body, "secret") }, body })).status).toBe(200);
+    await vi.waitFor(() => expect(log).toEqual(["start a1", "start b1"]));
+    finish.get("a1")!();
+    await vi.waitFor(() => expect(log).toEqual(["start a1", "start b1", "end a1", "start a2"]));
+  });
+
   it("rejects a signed body that is not a WhatsApp delivery", async () => {
     const url = await serve({ verifyToken: "v", appSecret: "secret", enqueue: vi.fn() });
     const body = JSON.stringify({ object: "page" });

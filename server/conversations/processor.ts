@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
 import { ENV } from "../_core/env";
-import { claimWhatsAppMessage, getConversation, getUsageCounts, incrementUsage, logMessage, saveConversation, TRANSCRIPT_LIMIT, type ConversationSnapshot, type TranscriptMessage } from "../db";
+import { appendTranscriptMessage, claimWhatsAppMessage, getConversation, getUsageCounts, incrementUsage, logMessage, saveConversation, TRANSCRIPT_LIMIT, type ConversationSnapshot, type TranscriptMessage } from "../db";
 import { nextOrderState, requiredOrderFields } from "../../shared/webasi";
 import { createConversationEngine, type StructuredReply } from "./engine";
 import type { ApprovedProjectSnapshot } from "./project";
 import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./sender";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
-import { createOrder, getSettings, recordEvent, getActiveProject, markOrderSlipReceived, compileProjectSnapshot, trackKnowledgeGap } from "../module-db";
+import { createOrder, getSettings, recordEvent, getActiveProject, markOrderSlipReceived, compileProjectSnapshot, saveShadowDraft, trackKnowledgeGap } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import { baileysTransport } from "../whatsapp/baileys";
 import { matchFaqCache } from "./faq-cache";
@@ -38,6 +38,8 @@ export type MessageProcessorDeps = {
   isOn?: boolean;
   getConversation?: typeof getConversation;
   saveConversation?: typeof saveConversation;
+  appendMessage?: typeof appendTranscriptMessage;
+  saveShadowDraft?: typeof saveShadowDraft;
   getUsageCounts?: typeof getUsageCounts;
   incrementUsage?: typeof incrementUsage;
   runEngine?: ReturnType<typeof createConversationEngine>["runTurn"];
@@ -90,6 +92,8 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const notify = deps.notifyOwner ?? notifyOwner;
   const getState = deps.getConversation ?? getConversation;
   const saveState = deps.saveConversation ?? saveConversation;
+  const appendMessage = deps.appendMessage ?? appendTranscriptMessage;
+  const saveDraft = deps.saveShadowDraft ?? saveShadowDraft;
   const usage = deps.getUsageCounts ?? getUsageCounts;
   const increment = deps.incrementUsage ?? incrementUsage;
   const sendText = deps.sendText ?? (ENV.whatsappTransport === "baileys" ? (input) => baileysTransport.sendText(input) : createWhatsAppSender());
@@ -118,10 +122,23 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   snapshot.lastClientMessageAt = now;
   if (message.profileName) snapshot.profileName = message.profileName;
   if (snapshot.state === "new") snapshot.state = "collecting";
+  // The stored transcript grows one message at a time, each written as it happens and in order. The client's message
+  // is therefore on the dashboard while the reply is still being written, and a message the owner sends in the
+  // meantime is not overwritten when the turn ends.
+  let transcriptWrite: Promise<unknown> | null = null;
+  const remember = (entry: TranscriptMessage) => {
+    appendTranscript(snapshot, entry);
+    const previous = transcriptWrite;
+    // The first write starts right here; a later one waits for the one before it, so the order is kept.
+    transcriptWrite = previous ? previous.catch(() => undefined).then(() => appendMessage(clientId, entry)) : (async () => appendMessage(clientId, entry))();
+    later("transcript", transcriptWrite);
+  };
   // Every client message lands in the transcript, including while paused, off or in shadow mode.
-  appendTranscript(snapshot, { role: "client", text: transcriptText(message) || "[message]", at: now.toISOString() });
+  const clientText = transcriptText(message) || "[message]";
+  remember({ role: "client", text: clientText, at: now.toISOString() });
 
   const done = async (reason: string, replied = false): Promise<ProcessResult> => {
+    await transcriptWrite?.catch(() => undefined);
     try { await saveState(snapshot); } finally { await Promise.all(background); }
     return { accepted: true, replied, reason, state: snapshot.state };
   };
@@ -276,14 +293,17 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
 
   if (settings.shadowMode) {
     event({ eventType: "shadow_draft", severity: "info", title: "Shadow-mode draft created", detail: replyText, clientId });
+    // Kept next to the message it answers, so the owner can send, edit or discard it from the Drafts page.
+    later("shadow draft", saveDraft({ clientId, clientMessage: clientText, draft: replyText }));
     return done("shadow_mode");
   }
 
   if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return done("whatsapp_usage_hard_stop");
 
-  const result = await sendText({ to: waId, body: replyText, humanize: true });
+  // A transport that throws (the Cloud API on a network error) must not lose the turn: what was learned is still saved.
+  const result = await sendText({ to: waId, body: replyText, humanize: true }).catch((error): SendTextResult => ({ accepted: false, reason: `send_failed: ${error instanceof Error ? error.message : String(error)}` }));
   if (result.accepted) {
-    appendTranscript(snapshot, { role: "assistant", text: replyText, at: new Date().toISOString() });
+    remember({ role: "assistant", text: replyText, at: new Date().toISOString() });
     later("usage counter", (async () => { for (let part = 0; part < (result.parts ?? 1); part++) await increment("outboundWhatsApp"); })());
     later("message log", log({ messageId: result.messageId ?? `out-${message.id}`, clientId, waId, role: "assistant", body: replyText, topic: structured?.intent ?? (answeredFromFaqs ? "question" : null), intentScore: snapshot.intentScore ?? null, handedOver: Boolean(structured?.needsOwner) }));
   } else {
