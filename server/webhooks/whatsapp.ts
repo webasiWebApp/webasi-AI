@@ -3,6 +3,7 @@ import express, { type Express, type Request, type Response } from "express";
 import { ENV } from "../_core/env";
 import { processWhatsAppMessage } from "../conversations/processor";
 import { pauseConversationByWaId } from "../module-db";
+import { createChatQueue } from "../whatsapp/chat-queue";
 
 export type WhatsAppMessage = {
   id: string;
@@ -93,6 +94,9 @@ export function registerWhatsAppWebhook(
   const appSecret = options.appSecret ?? ENV.whatsappAppSecret;
   const ownerWaId = options.ownerWaId ?? ENV.whatsappOwnerWaId;
   const enqueue = options.enqueue ?? ((message: ParsedWhatsAppMessage) => processWhatsAppMessage(message));
+  // One delivery can hold several messages from the same client, and Meta sends deliveries in parallel. Each chat's
+  // messages are handled one after another so two turns never read and save the same conversation at once.
+  const inChatOrder = createChatQueue((error) => console.error("[WhatsApp] message handling failed", error));
 
   // Raw-body parsing is scoped to this route so HMAC validation uses the exact bytes Meta signed.
   app.get("/api/webhooks/whatsapp", (req: Request, res: Response) => {
@@ -136,12 +140,8 @@ export function registerWhatsAppWebhook(
       // Acknowledge first. Meta retries unacknowledged deliveries, so processing must not block the response.
       res.status(200).send("EVENT_RECEIVED");
       queueMicrotask(() => {
-        for (const echo of ownerEchoes) {
-          Promise.resolve(pauseConversationByWaId(echo.waId ?? echo.from)).catch((error) => console.error("[WhatsApp] owner echo handling failed", error));
-        }
-        for (const message of messages) {
-          Promise.resolve(enqueue(message)).catch((error) => console.error("[WhatsApp] enqueue failed", error));
-        }
+        for (const echo of ownerEchoes) void inChatOrder(echo.waId ?? echo.from, () => pauseConversationByWaId(echo.waId ?? echo.from));
+        for (const message of messages) void inChatOrder(message.waId ?? message.from, () => enqueue(message));
       });
     },
   );

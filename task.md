@@ -78,3 +78,13 @@ Here's the updated task list with your changes applied.
 
 - [x] Follow-ups: one friendly nudge when a client goes quiet after WEBASI's last message — 6–23 h after their last message (inside WhatsApp's 24 h window), 9am–8pm Sri Lanka time, only while collecting details or awaiting the deposit, never for low-fit leads, paused or handed-over chats. Written by the AI in the client's language and grounding-checked, with a fixed fallback. Drafts only in shadow mode. Switch in Settings.
 - [x] Weekly summary: every Monday 9am to the owner's WhatsApp — chats, hot leads, handovers, orders and confirmed deposits, slips to verify, top objections, follow-ups sent, knowledge added, learned answers waiting, WhatsApp usage. Preview and "Send now" on Insights. Switch in Settings.
+
+## Phase 11 — Nothing waits unseen
+
+- [x] Handed-over chats are their own state: Conversations shows "Waiting for you" (WEBASI is not replying), a one-click "Hand back to WEBASI", and lets you reply straight away (sending takes the chat over).
+- [x] One reminder to your own WhatsApp chat when a client has waited 2 hours in a chat WEBASI is not answering (handed over or paused), 9am–8pm Sri Lanka time; again only if the client writes and waits again. `HANDOVER_REMINDER_HOURS` changes the wait, `0` switches it off.
+- [x] Drafts page: every reply written in shadow mode sits next to the client message it answers, to send as written, edit and send, or discard. A newer client message replaces the older draft.
+- [x] Optional clean-up: `EVENT_LOG_RETENTION_DAYS` and `MESSAGE_RETENTION_DAYS` delete older rows once a day (never below 14 and 30 days). Unset keeps everything.
+- [ ] **(owner)** Run `supabase/migrations/20261011_atomic_writes_and_indexes.sql` in the Supabase SQL Editor (see `supabase/README.md`).
+- [ ] **(owner)** Uptime alert: add the repository variable `WEBASI_HEALTH_URL` so `.github/workflows/uptime.yml` checks `/health` every 30 minutes and GitHub emails you when it fails.
+- [ ] **(owner)** Link a spare number once to confirm pairing and reconnects still behave, before relying on the change that stops asking for QR codes when none is scanned.

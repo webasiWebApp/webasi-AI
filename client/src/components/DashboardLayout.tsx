@@ -39,6 +39,7 @@ const menuItems = [
   { icon: Sparkles, label: "Training", path: "/training" },
   { icon: Bot, label: "Test Chat", path: "/test-chat" },
   { icon: MessagesSquare, label: "Conversations", path: "/conversations" },
+  { icon: MessageCircle, label: "Drafts", path: "/drafts" },
   { icon: Smartphone, label: "Connect WhatsApp", path: "/connect-whatsapp" },
   { icon: PackageCheck, label: "Orders", path: "/orders" },
   { icon: BarChart3, label: "Insights", path: "/insights" },

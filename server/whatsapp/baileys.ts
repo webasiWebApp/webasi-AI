@@ -6,6 +6,7 @@ import { processWhatsAppMessage } from "../conversations/processor";
 import { captureLearnedAnswer, pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
+import { createChatQueue } from "./chat-queue";
 
 export type BaileysConnectionStatus = "disconnected" | "pairing" | "connecting" | "connected" | "reconnecting" | "reconnect_required";
 export type BaileysStatus = { status: BaileysConnectionStatus; phoneNumber?: string; pairingCode?: string; qr?: string; lastError?: string; updatedAt: string; hasSession: boolean };
@@ -32,6 +33,8 @@ export function createDebouncer<T>(onFlush: (key: string, items: T[]) => void, d
   };
 }
 export const INBOUND_TEXT_DEBOUNCE_MS = 4000;
+// What Baileys closes the connection with when every QR code of a pairing attempt went unscanned.
+export const QR_EXPIRED_MESSAGE = "QR refs attempts ended";
 
 // Split a reply at blank lines into at most maxParts WhatsApp bubbles, the way a person sends several short messages.
 export function splitIntoBubbles(body: string, maxParts = 3) {
@@ -57,7 +60,7 @@ class BaileysTransport {
   private readonly recentSends = new Map<string, number[]>();
   // One queue per chat: each client's messages are handled in order, but a reply being typed out to one client
   // no longer makes every other client wait behind it.
-  private readonly chatQueues = new Map<string, Promise<void>>();
+  private readonly inChatOrder = createChatQueue((error) => console.error("[Baileys] inbound processing failed", error));
   // When "typing…" started showing in a chat, so the time the AI took counts toward the typing time.
   private readonly typingSince = new Map<string, number>();
   private readonly lastInboundKey = new Map<string, WAMessageKey>();
@@ -67,12 +70,6 @@ class BaileysTransport {
   private readonly textBuffer = createDebouncer<{ parsed: ParsedWhatsAppMessage; remoteJid: string }>((waId, items) => {
     this.inChatOrder(waId, () => this.processBatch(items));
   }, INBOUND_TEXT_DEBOUNCE_MS);
-
-  private inChatOrder(waId: string, task: () => Promise<void>) {
-    const next = (this.chatQueues.get(waId) ?? Promise.resolve()).then(task).catch((error) => console.error("[Baileys] inbound processing failed", error));
-    this.chatQueues.set(waId, next);
-    void next.then(() => { if (this.chatQueues.get(waId) === next) this.chatQueues.delete(waId); });
-  }
 
   async getStatus(): Promise<BaileysStatus> { return { status: this.status, phoneNumber: this.phoneNumber, pairingCode: this.pairingCode, qr: this.qr, lastError: this.lastError, updatedAt: new Date().toISOString(), hasSession: await hasBaileysSession() }; }
 
@@ -151,6 +148,14 @@ class BaileysTransport {
     if (update.connection === "close") {
       const statusCode = baileysStatusCode(update.lastDisconnect?.error);
       this.socket = null;
+      // Nobody scanned the codes. Baileys reports that as a timeout with this message; a scanned code ends with
+      // "restart required" instead and still reconnects below. Reconnecting here would only produce the next round of
+      // codes, again and again for as long as the number stays unlinked, so pairing waits until the owner asks.
+      if (String((update.lastDisconnect?.error as { message?: unknown } | undefined)?.message ?? "").includes(QR_EXPIRED_MESSAGE)) {
+        this.status = "disconnected"; this.qr = undefined; this.qrLogged = false; this.lastError = undefined;
+        await recordEvent({ eventType: "baileys_qr_expired", title: "WhatsApp QR code expired", detail: "Nobody scanned the QR code. Open Connect WhatsApp and generate a new one to link the number." });
+        return;
+      }
       // A code from a closed connection can no longer be scanned; the next connection brings its own.
       this.qr = undefined;
       if (statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession || statusCode === DisconnectReason.forbidden) {

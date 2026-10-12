@@ -2,10 +2,11 @@ import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
 import { ENV } from "./_core/env";
-import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, getInstantAnswers, refreshInstantAnswers, removeInstantAnswer, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap } from "./module-db";
+import { appendTranscriptMessage, getUsageCounts, incrementUsage, logMessage } from "./db";
+import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, getInstantAnswers, refreshInstantAnswers, removeInstantAnswer, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap, listConversationSummaries, getShadowDraft, listShadowDrafts, settleShadowDraft, restoreShadowDraft } from "./module-db";
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
+import { sendWhatsAppText } from "./whatsapp/outbound";
 import { sendWeeklySummary, weeklySummaryText } from "./automation";
 import { createConversationEngine, type StructuredReply } from "./conversations/engine";
 import { matchFaqCache } from "./conversations/faq-cache";
@@ -20,8 +21,9 @@ const refuse = (code: "NOT_FOUND" | "PRECONDITION_FAILED", message: string): nev
 
 export const appRouter = router({
   dashboard: router({
-    overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversations(), listOrders(), listEvents()]); return { settings, activeProject, usage, conversations, orders, events }; }),
-    conversations: protectedProcedure.query(() => listConversations()),
+    overview: protectedProcedure.query(async () => { await ensureDefaults(); const [settings, activeProject, usage, conversations, orders, events] = await Promise.all([getSettings(), getActiveProject(), getUsageCounts(), listConversationSummaries(), listOrders(), listEvents()]); return { settings, activeProject, usage, conversations, orders, events }; }),
+    // The lists carry each chat's last message, not its transcript; the open chat is read with conversations.get.
+    conversations: protectedProcedure.query(() => listConversationSummaries()),
     orders: protectedProcedure.query(() => listOrders()),
     events: protectedProcedure.query(() => listEvents()),
     insights: protectedProcedure.query(() => listInsights()),
@@ -48,6 +50,7 @@ export const appRouter = router({
     answer: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), answer: z.string().trim().min(3).max(4000) })).mutation(({ input }) => answerKnowledgeGap(input.id, input.answer)),
   }),
   conversations: router({
+    get: protectedProcedure.input(z.object({ clientId: key })).query(({ input }) => getConversationByClientId(input.clientId)),
     pause: protectedProcedure.input(z.object({ clientId: key })).mutation(({ input }) => pauseConversation(input.clientId)),
     resume: protectedProcedure.input(z.object({ clientId: key })).mutation(({ input }) => resumeConversation(input.clientId)),
     ownerMessage: protectedProcedure.input(z.object({ clientId: key, text: z.string().trim().min(1).max(2000) })).mutation(async ({ input }) => {
@@ -56,7 +59,7 @@ export const appRouter = router({
       const [settings, counts] = await Promise.all([getSettings(), getUsageCounts()]);
       if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
       await pauseConversation(input.clientId);
-      const result = await baileysTransport.sendText({ to: conversation.waId, body: input.text });
+      const result = await sendWhatsAppText({ to: conversation.waId, body: input.text });
       if (!result.accepted) return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" };
       await incrementUsage("outboundWhatsApp");
       await captureLearnedAnswer(conversation.waId, input.text);
@@ -65,6 +68,32 @@ export const appRouter = router({
       await recordEvent({ eventType: "dashboard_owner_message", severity: "info", title: "Owner message sent", detail: `Owner sent a dashboard message to ${conversation.profileName ?? conversation.waId}.`, clientId: input.clientId });
       return { accepted: true, messageId: result.messageId };
     }),
+  }),
+  // Replies written in shadow mode: the owner sends them as they are, edits them first, or discards them.
+  shadowDrafts: router({
+    list: protectedProcedure.query(() => listShadowDrafts()),
+    send: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), text: z.string().trim().min(1).max(4000).optional() })).mutation(async ({ input }) => {
+      const draft = await getShadowDraft(input.id);
+      if (!draft?.clientId) return { accepted: false, reason: "draft_not_found" };
+      const conversation = await getConversationByClientId(draft.clientId);
+      if (!conversation) return { accepted: false, reason: "conversation_not_found" };
+      const [settings, counts] = await Promise.all([getSettings(), getUsageCounts()]);
+      if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
+      const text = input.text ?? draft.draft;
+      // Taken out of the queue before it is sent, so a second click cannot send it twice; put back if the send fails.
+      if (!(await settleShadowDraft(input.id, "approved", text))) return { accepted: false, reason: "draft_already_handled" };
+      const result = await sendWhatsAppText({ to: conversation.waId, body: text });
+      if (!result.accepted) {
+        await restoreShadowDraft(input.id, draft.draft);
+        return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" };
+      }
+      await incrementUsage("outboundWhatsApp");
+      await appendTranscriptMessage(draft.clientId, { role: "assistant", text, at: new Date().toISOString() });
+      await logMessage({ messageId: result.messageId ?? `draft-${input.id}`, clientId: draft.clientId, waId: conversation.waId, role: "assistant", body: text, topic: "shadow_draft" }).catch((error) => console.error("[Dashboard] message log failed", error));
+      await recordEvent({ eventType: "shadow_draft_sent", severity: "info", title: text === draft.draft ? "Draft sent as written" : "Draft sent after editing", detail: `Sent to ${conversation.profileName ?? conversation.waId}: ${text.slice(0, 300)}`, clientId: draft.clientId });
+      return { accepted: true, messageId: result.messageId };
+    }),
+    discard: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => settleShadowDraft(input.id, "dismissed")),
   }),
   testChat: router({
     turn: protectedProcedure.input(z.object({ projectKey: key, incomingText: z.string().min(1).max(2000), recentMessages: z.array(z.object({ role: z.enum(["client", "assistant"]), text: z.string().max(4000) })).max(40), clientNotes: z.string().max(1000).optional(), state: z.enum(["new", "collecting", "brief_complete", "awaiting_deposit", "slip_received", "confirmed_by_owner", "needs_owner", "paused", "abandoned", "cancelled"]).default("collecting") })).mutation(async ({ input }): Promise<StructuredReply & { answeredFromFaqs?: boolean }> => {

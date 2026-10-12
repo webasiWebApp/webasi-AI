@@ -34,6 +34,8 @@ export function createWhatsAppSender({
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
       body: JSON.stringify(buildTextMessagePayload(input)),
+      // A request that hangs would hold up every later message in the same chat.
+      signal: AbortSignal.timeout(15_000),
     });
     const data = await response.json().catch(() => ({})) as { messages?: Array<{ id?: string }>; error?: { message?: string } };
     if (!response.ok) return { accepted: false, reason: data.error?.message ?? `meta_http_${response.status}` };

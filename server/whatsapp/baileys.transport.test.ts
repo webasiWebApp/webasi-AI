@@ -81,6 +81,36 @@ describe("pairing", () => {
   });
 });
 
+describe("pairing that nobody completes", () => {
+  const qrExpired = { connection: "close", lastDisconnect: { error: { message: "QR refs attempts ended", output: { statusCode: 408 } } } };
+
+  it("stops asking for codes when none was scanned, until the owner asks again", async () => {
+    await transport.start();
+    await update(world.sockets[0], { qr: "code-1" });
+    await update(world.sockets[0], qrExpired);
+    expect((await transport.getStatus()).status).toBe("disconnected");
+    expect(eventTypes()).toContain("baileys_qr_expired");
+    await tick(300_000);
+    expect(world.sockets).toHaveLength(1);
+
+    const pairing = transport.startPairing();
+    await tick();
+    await update(world.sockets[1], { qr: "code-2" });
+    await tick(300);
+    expect(await pairing).toBe("code-2");
+  });
+
+  it("still reconnects after a scanned code asks for a restart, and after a lost connection", async () => {
+    await transport.start();
+    await update(world.sockets[0], closed(515));
+    await tick(2000);
+    expect(world.sockets).toHaveLength(2);
+    await update(world.sockets[1], closed(408));
+    await tick(4000);
+    expect(world.sockets).toHaveLength(3);
+  });
+});
+
 describe("connection", () => {
   it("reports connected once the socket opens", async () => {
     expect(transport.isConnected()).toBe(false);

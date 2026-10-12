@@ -1,0 +1,41 @@
+name: Uptime check
+
+# Asks the running server whether it is healthy. A failed run makes GitHub email the repository owner, which matters
+# most when WhatsApp itself is the thing that broke: the server's own alerts are sent over WhatsApp.
+#
+# To switch it on, add a repository variable (Settings → Secrets and variables → Actions → Variables):
+#   WEBASI_HEALTH_URL = https://<your server>/health
+# Without it the job does nothing. GitHub runs schedules on a best-effort basis and pauses them after 60 days without
+# repository activity; in a private repository each run counts as one minute of the Actions allowance.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check /health
+        env:
+          HEALTH_URL: ${{ vars.WEBASI_HEALTH_URL }}
+        run: |
+          if [ -z "$HEALTH_URL" ]; then
+            echo "WEBASI_HEALTH_URL is not set, so there is nothing to check."
+            exit 0
+          fi
+          # Three tries, twenty seconds apart: a sleeping free-tier server needs a moment, and a reconnect in progress
+          # should not raise an alarm.
+          for attempt in 1 2 3; do
+            status=$(curl --silent --show-error --output body.json --write-out "%{http_code}" --max-time 60 "$HEALTH_URL" || echo 000)
+            body=$(cat body.json 2>/dev/null || true)
+            echo "attempt $attempt: HTTP $status $body"
+            # Healthy means the database answers and WhatsApp is not in a state that only the owner can fix.
+            if [ "$status" = "200" ] && ! echo "$body" | grep -qE '"status":"(disconnected|reconnect_required)"'; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::WEBASI is not healthy (HTTP $status). Open the dashboard: the database or the WhatsApp connection needs attention."
+          exit 1

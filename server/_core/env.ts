@@ -41,4 +41,10 @@ export const ENV = {
   // Requests per minute one address may make to the dashboard API, and the smaller allowance for calls that spend AI requests.
   apiRateLimitPerMinute: numberFromEnv(process.env.API_RATE_LIMIT_PER_MINUTE, 240),
   aiRateLimitPerMinute: numberFromEnv(process.env.AI_RATE_LIMIT_PER_MINUTE, 20),
+  // Hours a client may wait in a chat WEBASI is not answering (handed over, or paused by the owner) before the owner
+  // gets one reminder. 0 switches the reminders off.
+  handoverReminderHours: numberFromEnv(process.env.HANDOVER_REMINDER_HOURS, 2, 0),
+  // Days to keep event-log entries and logged messages before they are deleted. 0, the default, keeps everything.
+  eventLogRetentionDays: numberFromEnv(process.env.EVENT_LOG_RETENTION_DAYS, 0, 0),
+  messageRetentionDays: numberFromEnv(process.env.MESSAGE_RETENTION_DAYS, 0, 0),
 };

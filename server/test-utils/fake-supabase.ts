@@ -104,11 +104,12 @@ class FakeQuery implements PromiseLike<Result> {
   insert(values: Row | Row[]) { this.action = "insert"; this.payload = Array.isArray(values) ? values : [values]; return this; }
   update(values: Row) { this.action = "update"; this.payload = [values]; return this; }
   upsert(values: Row | Row[], options: { onConflict?: string } = {}) { this.action = "upsert"; this.payload = Array.isArray(values) ? values : [values]; this.conflictColumn = options.onConflict; return this; }
-  delete() { this.action = "delete"; return this; }
+  delete(_options: { count?: string } = {}) { this.action = "delete"; return this; }
 
   eq(column: string, value: unknown) { this.filters.push((row) => row[column] === value); return this; }
   neq(column: string, value: unknown) { this.filters.push((row) => row[column] !== value); return this; }
   gte(column: string, value: any) { this.filters.push((row) => row[column] >= value); return this; }
+  lt(column: string, value: any) { this.filters.push((row) => row[column] < value); return this; }
   in(column: string, values: unknown[]) { this.filters.push((row) => values.includes(row[column])); return this; }
   like(column: string, pattern: string) {
     const expression = new RegExp(`^${pattern.split("%").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
