@@ -23,9 +23,9 @@ beforeAll(async () => {
 
 describe("database migrations", () => {
   it("apply in order to an empty database", async () => {
-    expect(files.length).toBeGreaterThanOrEqual(7);
+    expect(files.length).toBeGreaterThanOrEqual(9);
     const tables = (await rows<{ tablename: string }>("select tablename from pg_tables where schemaname = 'public' order by tablename")).map((row) => row.tablename);
-    expect(tables).toEqual(["baileys_auth_state", "conversations", "event_log", "insights", "knowledge_gaps", "messages", "orders", "projects", "settings", "training_sessions", "usage_counters"]);
+    expect(tables).toEqual(["baileys_auth_state", "conversations", "documents", "event_log", "insights", "job_tasks", "jobs", "knowledge_gaps", "ledger_entries", "meetings", "messages", "orders", "projects", "reminder_log", "renewals", "settings", "task_templates", "training_sessions", "usage_counters"]);
   });
 
   it("can be re-run from 002 onwards without error, as the README says", async () => {

@@ -25,6 +25,8 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
   throw new Error(`No available port found starting from ${startPort}`);
 }
 
+if (process.env.DASHBOARD_PASSWORD) console.warn("[Auth] DASHBOARD_PASSWORD is deprecated and ignored. Set DASHBOARD_PIN instead.");
+
 export const app = createApp();
 export const server = createServer(app);
 

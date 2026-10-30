@@ -6,10 +6,13 @@ import { createContext } from "./context";
 import { registerWhatsAppWebhook } from "../webhooks/whatsapp";
 import { ENV } from "./env";
 import { checkSupabaseConnection } from "./supabase";
-import { dashboardPassword, rateLimit } from "./http-guards";
+import { rateLimit } from "./http-guards";
+import { registerPinLock } from "./pin-lock";
+import { registerDocumentRoutes } from "../documents/routes";
 
 export type AppOptions = {
-  dashboardPassword?: string;
+  dashboardPin?: string;
+  sessionSecret?: string;
   apiRateLimitPerMinute?: number;
   aiRateLimitPerMinute?: number;
   production?: boolean;
@@ -41,7 +44,6 @@ const CONTENT_SECURITY_POLICY = [
  * It starts nothing (no WhatsApp connection, no timers, no listener), so tests can use it as it is.
  */
 export function createApp(options: AppOptions = {}): Express {
-  const password = options.dashboardPassword ?? ENV.dashboardPassword;
   const production = options.production ?? ENV.isProduction;
   const app = express();
 
@@ -68,7 +70,7 @@ export function createApp(options: AppOptions = {}): Express {
   // third. Hosts that already compress at their edge pass this through unchanged.
   app.use(compression());
 
-  if (password) app.use(dashboardPassword(password));
+  registerPinLock(app, { pin: options.dashboardPin ?? ENV.dashboardPin, secret: options.sessionSecret ?? ENV.cookieSecret, production });
 
   if ((options.whatsappTransport ?? ENV.whatsappTransport) === "cloud") registerWhatsAppWebhook(app);
 
@@ -84,6 +86,10 @@ export function createApp(options: AppOptions = {}): Express {
     res.status(ok ? 200 : 503).json({ ok, service: "webasi", supabase: { ok: supabase.ok }, whatsapp, time: new Date().toISOString() });
   });
   app.get("/healthz", (_req, res) => res.status(200).json({ ok: true }));
+
+  // PDF and CSV downloads. Registered before the JSON parser below: the credentials sheet parses its own body so a bad one
+  // never reaches a general error log.
+  registerDocumentRoutes(app);
 
   // The dashboard only sends small JSON payloads; a large limit is a free memory-exhaustion vector.
   app.use(express.json({ limit: "100kb" }));
@@ -104,6 +110,15 @@ export function createApp(options: AppOptions = {}): Express {
 
   // An unknown API path is an error, not the dashboard page with a 200.
   app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
+
+  // The last stop for a failed request. It logs what happened and where, never the error's message: a body-parser error can
+  // quote part of the request, and some requests (the credentials sheet) carry secrets.
+  app.use((error: { status?: number; statusCode?: number; name?: string }, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const status = Number(error?.status ?? error?.statusCode);
+    const code = status >= 400 && status < 500 ? status : 500;
+    console.error("[HTTP] request failed:", req.method, req.path, code, error?.name ?? "Error");
+    res.status(code).json({ error: code === 413 ? "The request is too large." : "The request could not be processed." });
+  });
 
   return app;
 }

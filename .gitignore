@@ -116,3 +116,7 @@ branch_structure.json
 temp_auto_push.bat
 temp_interactive_push.bat
 .gitignore
+
+# Google service-account keys (secrets)
+gen-lang-client-*.json
+*-service-account*.json

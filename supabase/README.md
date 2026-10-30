@@ -9,12 +9,14 @@
    5. [`20261002_increment_usage_rpc.sql`](migrations/20261002_increment_usage_rpc.sql)
    6. [`20261004_knowledge_gaps.sql`](migrations/20261004_knowledge_gaps.sql)
    7. [`20261011_atomic_writes_and_indexes.sql`](migrations/20261011_atomic_writes_and_indexes.sql)
+   8. [`20261029_jobs_documents_ledger.sql`](migrations/20261029_jobs_documents_ledger.sql) (the client pipeline: jobs, meetings, tasks, documents, ledger; the finance rules live here as constraints and triggers)
+   9. [`20261030_renewals_reminders.sql`](migrations/20261030_renewals_reminders.sql) (renewals and the reminder log)
 
    If the tables already exist, run only the files you have not applied; everything from 002 onwards is safe to re-run.
-   The last three are optional for the server to work: without them it falls back to slower read-then-write paths
+   Items 5 to 7 are optional for the server to work: without them it falls back to slower read-then-write paths
    and has no indexes for its repeated queries. With them, usage counters, transcript updates and project switching
    happen in single database steps.
-3. Confirm the tables `settings`, `projects`, `conversations`, `messages`, `event_log`, `usage_counters`, `training_sessions`, `insights`, `orders`, `knowledge_gaps`, and `baileys_auth_state` exist.
+3. Confirm the tables `settings`, `projects`, `conversations`, `messages`, `event_log`, `usage_counters`, `training_sessions`, `insights`, `orders`, `knowledge_gaps`, `baileys_auth_state`, `jobs`, `meetings`, `task_templates`, `job_tasks`, `documents`, `ledger_entries`, `renewals` and `reminder_log` exist.
 4. Keep `SUPABASE_SERVICE_ROLE_KEY` server-only. Set it in Render environment variables; never expose it as a `VITE_*` variable.
 5. Check `/health` after deployment. It should report both Supabase and WhatsApp status.
 

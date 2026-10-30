@@ -15,6 +15,10 @@ import {
   Activity,
   BarChart3,
   Bot,
+  CalendarDays,
+  CalendarCheck,
+  Kanban,
+  Wallet,
   FileClock,
   FolderKanban,
   LayoutDashboard,
@@ -24,6 +28,7 @@ import {
   PackageCheck,
   Settings,
   Sparkles,
+  LockKeyhole,
   PanelLeft,
   UserRound,
 } from "lucide-react";
@@ -35,6 +40,10 @@ import { useIsMobile } from "@/hooks/useMobile";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Home", path: "/" },
+  { icon: CalendarCheck, label: "Today", path: "/today" },
+  { icon: Kanban, label: "Pipeline", path: "/pipeline" },
+  { icon: CalendarDays, label: "Calendar", path: "/calendar" },
+  { icon: Wallet, label: "Finance", path: "/finance" },
   { icon: FolderKanban, label: "Projects", path: "/projects" },
   { icon: Sparkles, label: "Training", path: "/training" },
   { icon: Bot, label: "Test Chat", path: "/test-chat" },
@@ -49,7 +58,7 @@ const menuItems = [
 
 const SIDEBAR_WIDTH_KEY = "webasi-sidebar-width";
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default function DashboardLayout({ children, onLock }: { children: React.ReactNode; onLock?: () => void }) {
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
     return saved ? parseInt(saved, 10) : 248;
@@ -61,16 +70,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <SidebarProvider style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
-      <DashboardLayoutContent>{children}</DashboardLayoutContent>
+      <DashboardLayoutContent onLock={onLock}>{children}</DashboardLayoutContent>
     </SidebarProvider>
   );
 }
 
-function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
+function DashboardLayoutContent({ children, onLock }: { children: React.ReactNode; onLock?: () => void }) {
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const isMobile = useIsMobile();
   const activeMenuItem = menuItems.find((item) => item.path === location) ?? menuItems[0];
+  void activeMenuItem;
   const displayName = "WEBASI owner";
   const displayEmail = "Local workspace";
   const initials = displayName.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
@@ -101,7 +111,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
           <p className="mb-3 px-3 text-[10px] font-bold uppercase tracking-[0.14em] text-[#94A3B8] group-data-[collapsible=icon]:hidden">Workspace</p>
           <SidebarMenu className="gap-1">
             {menuItems.map((item) => {
-              const isActive = location === item.path;
+              const isActive = location === item.path || (item.path === "/pipeline" && location.startsWith("/jobs/"));
               return (
                 <SidebarMenuItem key={item.path}>
                   <SidebarMenuButton
@@ -133,6 +143,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" side="top" className="w-52 rounded-xl border-[#E2E8F0] p-1.5 shadow-[0_12px_30px_rgba(15,23,42,0.12)]">
               <DropdownMenuItem onClick={() => setLocation("/settings")} className="cursor-pointer rounded-lg text-xs"><Settings className="mr-2 h-3.5 w-3.5" />Workspace settings</DropdownMenuItem>
+              {onLock && <DropdownMenuItem onClick={onLock} className="cursor-pointer rounded-lg text-xs"><LockKeyhole className="mr-2 h-3.5 w-3.5" />Lock dashboard</DropdownMenuItem>}
             </DropdownMenuContent>
           </DropdownMenu>
         </SidebarFooter>
@@ -142,7 +153,7 @@ function DashboardLayoutContent({ children }: { children: React.ReactNode }) {
         {isMobile && (
           <div className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-[#E2E8F0] bg-white/95 px-4 backdrop-blur">
             <div className="flex items-center gap-3"><SidebarTrigger className="h-9 w-9 rounded-lg border border-[#E2E8F0] bg-white" /><div className="flex items-center gap-2"><div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#2563FF] text-[10px] font-bold text-white">W</div><span className="text-sm font-bold tracking-[-0.02em] text-[#0F172A]">WEBASI</span></div></div>
-            <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#22C55E]" /><span className="text-[11px] font-medium text-[#64748B]">Live</span></div>
+            <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#22C55E]" /><span className="text-[11px] font-medium text-[#64748B]">Live</span>{onLock && <button onClick={onLock} aria-label="Lock dashboard" className="ml-2 flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#64748B]"><LockKeyhole className="h-4 w-4" /></button>}</div>
           </div>
         )}
         <main className="min-h-screen">{children}</main>

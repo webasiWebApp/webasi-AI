@@ -6,6 +6,9 @@ import { draftFollowUp, modelForProvider } from "./conversations/engine";
 import { outboundCapAllows } from "./conversations/sender";
 import { canSendWhatsApp, sendWhatsAppText } from "./whatsapp/outbound";
 import type { OrderState } from "../shared/webasi";
+import { isCivilHour } from "../shared/time";
+import { runPipelineReminders } from "./pipeline-reminders";
+import { runMeetingSync } from "./integrations/meeting-sync";
 
 export const FOLLOW_UP_AFTER_HOURS = 6;
 // WhatsApp only allows replies within 24h of the client's last message; stay well inside it.
@@ -18,7 +21,7 @@ const colomboParts = (now: Date) => {
 };
 
 // Messages to clients only go out at civil hours, Sri Lanka time.
-export function isSendingHours(now: Date) { const { hour } = colomboParts(now); return hour >= 9 && hour < 20; }
+export const isSendingHours = isCivilHour;
 
 export type FollowUpCandidate = {
   isPaused: boolean; handedOver?: boolean; state: string; intentScore?: string | null;
@@ -183,6 +186,8 @@ export function weeklySummaryDue(now: Date, lastSentAt: Date | null) {
 }
 
 async function tick() {
+  try { await runPipelineReminders(); } catch (error) { console.error("[Automation] pipeline reminders failed", error instanceof Error ? error.message : error); }
+  try { await runMeetingSync(); } catch (error) { console.error("[Automation] calendar sync failed", error instanceof Error ? error.message : error); }
   try { await runFollowUps(); } catch (error) { console.error("[Automation] follow-ups failed", error instanceof Error ? error.message : error); }
   try { await runHandoverReminders(); } catch (error) { console.error("[Automation] waiting-client reminders failed", error instanceof Error ? error.message : error); }
   try { await runRetention(); } catch (error) { console.error("[Automation] retention failed", error instanceof Error ? error.message : error); }

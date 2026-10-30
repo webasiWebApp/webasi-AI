@@ -2,6 +2,9 @@
   "version": 2,
   "buildCommand": "pnpm build",
   "outputDirectory": "dist/public",
+  "functions": {
+    "api/index.ts": { "includeFiles": "server/documents/{assets,fonts}/**" }
+  },
   "rewrites": [
     {
       "source": "/api/(.*)",

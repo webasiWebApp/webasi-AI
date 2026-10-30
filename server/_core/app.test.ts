@@ -13,7 +13,7 @@ const closers: Array<() => Promise<unknown>> = [];
 afterEach(async () => { await Promise.all(closers.splice(0).map((close) => close())); });
 
 async function serve(options: AppOptions = {}) {
-  const server = createApp({ dashboardPassword: "", production: false, whatsappTransport: "baileys", ...options }).listen(0, "127.0.0.1");
+  const server = createApp({ dashboardPin: "", production: false, whatsappTransport: "baileys", ...options }).listen(0, "127.0.0.1");
   await once(server, "listening");
   closers.push(() => new Promise((resolve) => server.close(resolve)));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -23,7 +23,6 @@ async function serve(options: AppOptions = {}) {
     mutate: (procedure: string, input: unknown, headers: Record<string, string> = {}) => fetch(`${base}/api/trpc/${procedure}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ json: input }) }),
   };
 }
-const basic = (password: string) => ({ authorization: `Basic ${Buffer.from(`owner:${password}`).toString("base64")}` });
 
 describe("HTTP hardening", () => {
   it("sends the security headers and keeps the dashboard out of search engines", async () => {
@@ -124,41 +123,5 @@ describe("rate limiting", () => {
     expect((await app.mutate("testChat.turn", turn)).status).toBe(404); // counted, then refused by the router: no such project
     expect((await app.mutate("testChat.turn", turn)).status).toBe(429);
     expect((await app.get("/api/trpc/dashboard.conversations")).status).toBe(200);
-  });
-});
-
-describe("optional dashboard password", () => {
-  const password = "correct horse battery staple";
-
-  it("leaves the dashboard open when no password is set, as before", async () => {
-    expect((await (await serve()).get("/api/trpc/dashboard.conversations")).status).toBe(200);
-  });
-
-  it("asks for the password on the API and the pages, but not on the uptime checks", async () => {
-    const app = await serve({ dashboardPassword: password });
-    const refused = await app.get("/api/trpc/dashboard.conversations");
-    expect(refused.status).toBe(401);
-    expect(refused.headers.get("www-authenticate")).toContain("Basic");
-    expect((await app.get("/")).status).toBe(401);
-    expect((await app.get("/healthz")).status).toBe(200);
-    expect((await app.get("/api/keepalive")).status).toBe(200);
-    expect((await app.get("/api/trpc/dashboard.conversations", basic(password))).status).toBe(200);
-    expect((await app.get("/api/trpc/dashboard.conversations", basic("wrong"))).status).toBe(401);
-  });
-
-  it("locks an address out after repeated wrong passwords, even if the next one is right", async () => {
-    const app = await serve({ dashboardPassword: password });
-    for (let attempt = 0; attempt < 10; attempt++) expect((await app.get("/api/trpc/dashboard.conversations", basic(`guess-${attempt}`))).status).toBe(401);
-    expect((await app.get("/api/trpc/dashboard.conversations", basic(password))).status).toBe(429);
-  });
-
-  it("refuses a change submitted from another site, and accepts the dashboard's own", async () => {
-    const app = await serve({ dashboardPassword: password });
-    const crossSite = await app.mutate("settings.update", { shadowMode: true }, { ...basic(password), origin: "https://evil.example" });
-    expect(crossSite.status).toBe(403);
-    const formPost = await fetch(`${app.base}/api/trpc/whatsapp.reset`, { method: "POST", headers: { ...basic(password), "sec-fetch-site": "cross-site", "content-type": "application/x-www-form-urlencoded" }, body: "a=1" });
-    expect(formPost.status).toBe(403);
-    const ownPage = await app.mutate("settings.update", { shadowMode: true }, { ...basic(password), origin: app.base });
-    expect(ownPage.status).toBe(200);
   });
 });

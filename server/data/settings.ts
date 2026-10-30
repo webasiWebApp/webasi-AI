@@ -2,6 +2,9 @@ import { ENV } from "../_core/env";
 import { getSupabaseServer } from "../_core/supabase";
 import { approvedRestaurantProject } from "../conversations/project";
 import { formatAutomationAudit } from "../../shared/webasi";
+import { DEFAULT_DOCUMENT_SETTINGS, mergeDocumentSettings } from "../../shared/documents";
+import { DEFAULT_LEDGER_CATEGORIES } from "../../shared/finance";
+import { DEFAULT_REMINDER_SETTINGS, mergeReminderSettings } from "../../shared/reminders";
 import { hasDatabase, invalidateProjectCaches, settingsCache } from "./core";
 import { recordEvent } from "./events";
 
@@ -30,12 +33,19 @@ export async function ensureDefaults() {
   defaultsEnsured = true;
 }
 
+// Expense categories are the owner's to edit; the income categories are fixed because the finance formulas depend on them.
+function mergeLedgerCategories(stored: unknown) {
+  const given = stored && typeof stored === "object" ? (stored as { expense?: unknown }) : {};
+  const expense = Array.isArray(given.expense) ? given.expense.filter((name): name is string => typeof name === "string" && name.trim().length > 0).map((name) => name.trim()) : [];
+  return { income: DEFAULT_LEDGER_CATEGORIES.income, expense: expense.length ? [...new Set(expense)] : DEFAULT_LEDGER_CATEGORIES.expense };
+}
+
 async function loadSettings() {
-  if (!hasDatabase()) return { businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false };
+  if (!hasDatabase()) return { registrationNo: "", nextDocumentNumber: 9248, defaultAdvancePercent: 40, documentSettings: DEFAULT_DOCUMENT_SETTINGS, reminderSettings: DEFAULT_REMINDER_SETTINGS, ledgerCategories: mergeLedgerCategories(null), templateReviewDismissed: false, businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false };
   await ensureDefaults();
   const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single();
   if (error) throw error;
-  return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false };
+  return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false, registrationNo: (data.registration_no ?? "") as string, nextDocumentNumber: (data.next_document_number ?? 9248) as number, defaultAdvancePercent: (data.default_advance_percent ?? 40) as number, documentSettings: mergeDocumentSettings(data.document_settings), reminderSettings: mergeReminderSettings(data.reminder_settings), ledgerCategories: mergeLedgerCategories(data.ledger_categories), templateReviewDismissed: Boolean(data.template_review_dismissed) };
 }
 
 export async function getSettings() {
@@ -46,7 +56,7 @@ export async function getSettings() {
   return result;
 }
 
-export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean }) {
+export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean; registrationNo?: string; nextDocumentNumber?: number; defaultAdvancePercent?: number; documentSettings?: Record<string, unknown>; reminderSettings?: Record<string, unknown>; expenseCategories?: string[]; templateReviewDismissed?: boolean }) {
   settingsCache.invalidate();
   invalidateProjectCaches(); // the compiled facts fall back to the business name from settings
   await ensureDefaults();
@@ -71,8 +81,18 @@ export async function updateSettings(input: { businessName?: string; bankDetails
   if (input.shadowMode !== undefined) set.shadow_mode = input.shadowMode;
   if (input.followupsEnabled !== undefined) set.followups_enabled = input.followupsEnabled;
   if (input.weeklySummaryEnabled !== undefined) set.weekly_summary_enabled = input.weeklySummaryEnabled;
-  const { error } = await supabase.from("settings").update(set).eq("singleton_key", "owner");
-  if (error) throw error;
+  if (input.registrationNo !== undefined) set.registration_no = input.registrationNo;
+  // The next number to issue only moves forward: lowering it could hand out a number that is already on a document.
+  if (input.nextDocumentNumber !== undefined && input.nextDocumentNumber > (current?.next_document_number ?? 0)) set.next_document_number = input.nextDocumentNumber;
+  if (input.defaultAdvancePercent !== undefined) set.default_advance_percent = input.defaultAdvancePercent;
+  if (input.documentSettings !== undefined) set.document_settings = { ...mergeDocumentSettings(current?.document_settings), ...input.documentSettings };
+  if (input.reminderSettings !== undefined) set.reminder_settings = { ...mergeReminderSettings(current?.reminder_settings), ...input.reminderSettings };
+  if (input.expenseCategories !== undefined) set.ledger_categories = { expense: input.expenseCategories };
+  if (input.templateReviewDismissed !== undefined) set.template_review_dismissed = input.templateReviewDismissed;
+  if (Object.keys(set).length > 0) {
+    const { error } = await supabase.from("settings").update(set).eq("singleton_key", "owner");
+    if (error) throw error;
+  }
   if (input.webasiEnabled !== undefined && Boolean(current?.webasi_enabled) !== input.webasiEnabled) await recordEvent({ eventType: "automation_state_changed", severity: input.webasiEnabled ? "warning" : "info", title: input.webasiEnabled ? "Automation enabled" : "Automation disabled", detail: formatAutomationAudit({ actor: "owner", project: activeProject?.name ?? "none", previous: Boolean(current?.webasi_enabled) ? "ON" : "OFF", next: input.webasiEnabled ? "ON" : "OFF", detail: input.webasiEnabled ? (shadowAfter ? "Replies remain drafts because shadow mode is enabled." : "Live replies are permitted while WhatsApp is connected.") : "Incoming messages remain logged without replies." }) });
   if (input.shadowMode !== undefined && Boolean(current?.shadow_mode) !== input.shadowMode) await recordEvent({ eventType: "shadow_mode_changed", severity: "info", title: input.shadowMode ? "Shadow mode enabled" : "Shadow mode disabled", detail: formatAutomationAudit({ actor: "owner", project: activeProject?.name ?? "none", previous: Boolean(current?.shadow_mode) ? "SHADOW" : "NORMAL", next: input.shadowMode ? "SHADOW" : "NORMAL", detail: input.shadowMode ? "WEBASI will draft replies for review without sending them to clients." : "WEBASI returned to its normal sending policy when enabled." }) });
   return true;

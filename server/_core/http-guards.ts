@@ -44,58 +44,18 @@ export function rateLimit({ windowMs = 60_000, max, applies = () => true }: { wi
   };
 }
 
-// Paths that must answer without the dashboard password: uptime checks, and Meta's webhook (which proves itself with a signature).
-const OPEN_PATHS = ["/health", "/healthz", "/api/keepalive"];
-const isOpenPath = (path: string) => OPEN_PATHS.includes(path) || path.startsWith("/api/webhooks/");
-
-const sameSecret = (given: string, expected: string) => {
+export const sameSecret = (given: string, expected: string) => {
   const digest = (value: string) => crypto.createHash("sha256").update(value).digest();
   return crypto.timingSafeEqual(digest(given), digest(expected));
 };
 
-function passwordFrom(req: Request): string | null {
-  const [scheme, encoded] = (req.headers.authorization ?? "").split(" ");
-  if (scheme?.toLowerCase() !== "basic" || !encoded) return null;
-  const decoded = Buffer.from(encoded, "base64").toString("utf8");
-  const separator = decoded.indexOf(":");
-  return separator < 0 ? null : decoded.slice(separator + 1);
-}
-
-// A browser sends saved Basic credentials with any request to the site, including a form another site submits.
-// With the password on, a request that changes something must therefore come from the dashboard's own pages.
-function isCrossSiteWrite(req: Request) {
+// A browser sends its cookies with any request to the site, including a form another site submits.
+// A request that changes something must therefore come from the dashboard's own pages.
+export function isCrossSiteWrite(req: Request) {
   if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return false;
   if (req.headers["sec-fetch-site"] === "cross-site") return true;
   const origin = req.headers.origin;
   if (!origin) return false;
   const hosts = [req.headers.host, req.headers["x-forwarded-host"]].flat().filter(Boolean);
   try { return !hosts.includes(new URL(origin).host); } catch { return true; }
-}
-
-/**
- * Optional password for the dashboard and its API (HTTP Basic, so the browser asks for it and no login page is needed).
- * The user name is ignored. Repeated wrong passwords from one address are refused for a while.
- */
-export function dashboardPassword(password: string, { maxFailures = 10, lockoutMs = 15 * 60_000 }: { maxFailures?: number; lockoutMs?: number } = {}): RequestHandler {
-  const failures = createWindowCounter(lockoutMs);
-  return (req: Request, res: Response, next: NextFunction) => {
-    if (isOpenPath(req.path)) { next(); return; }
-    const key = clientKey(req);
-    if (failures.peek(key) >= maxFailures) {
-      res.status(429).json({ error: "Too many failed sign-in attempts. Try again later." });
-      return;
-    }
-    const given = passwordFrom(req);
-    if (given === null || !sameSecret(given, password)) {
-      if (given !== null) failures.hit(key);
-      res.set("WWW-Authenticate", 'Basic realm="WEBASI dashboard", charset="UTF-8"');
-      res.status(401).send("Authentication required");
-      return;
-    }
-    if (isCrossSiteWrite(req)) {
-      res.status(403).json({ error: "Cross-site request refused." });
-      return;
-    }
-    next();
-  };
 }

@@ -4,6 +4,7 @@ import { httpBatchLink } from "@trpc/client";
 import { createRoot } from "react-dom/client";
 import superjson from "superjson";
 import App from "./App";
+import { LOCKED_EVENT } from "./hooks/useDashboardLock";
 import "./index.css";
 
 const queryClient = new QueryClient();
@@ -13,11 +14,14 @@ const trpcClient = trpc.createClient({
     httpBatchLink({
       url: "/api/trpc",
       transformer: superjson,
-      fetch(input, init) {
-        return globalThis.fetch(input, {
+      async fetch(input, init) {
+        const response = await globalThis.fetch(input, {
           ...(init ?? {}),
           credentials: "include",
         });
+        // The PIN session ended (or was never there): back to the lock screen.
+        if (response.status === 401) window.dispatchEvent(new Event(LOCKED_EVENT));
+        return response;
       },
     }),
   ],

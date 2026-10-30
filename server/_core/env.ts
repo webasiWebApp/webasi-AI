@@ -36,7 +36,9 @@ export const ENV = {
   baileysPhoneNumber: process.env.BAILEYS_PHONE_NUMBER ?? "",
   baileysSessionEncryptionKey: process.env.BAILEYS_SESSION_ENCRYPTION_KEY || process.env.JWT_SECRET || "",
   baileysRateLimitPerMinute: numberFromEnv(process.env.BAILEYS_RATE_LIMIT_PER_MINUTE, 8),
-  // Optional. When set, the dashboard and its API ask for this password (HTTP Basic); unset keeps the no-login behaviour.
+  // The PIN that unlocks the dashboard. Production serves nothing but the health checks until it is set.
+  dashboardPin: process.env.DASHBOARD_PIN ?? "",
+  // Deprecated and ignored: the PIN lock replaced the HTTP Basic password. Kept so a leftover value can be reported.
   dashboardPassword: process.env.DASHBOARD_PASSWORD ?? "",
   // Requests per minute one address may make to the dashboard API, and the smaller allowance for calls that spend AI requests.
   apiRateLimitPerMinute: numberFromEnv(process.env.API_RATE_LIMIT_PER_MINUTE, 240),

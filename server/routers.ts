@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
+import { documentSettingsPatch, documentsRouter, financeRouter, jobsRouter, ledgerRouter, meetingsRouter, reminderSettingsPatch, renewalsRouter, tasksRouter, todayRouter } from "./routers.pipeline";
 import { ENV } from "./_core/env";
 import { appendTranscriptMessage, getUsageCounts, incrementUsage, logMessage } from "./db";
 import { analyzeInsights, setInsightStatus, approveProject, activateProject, createProject, confirmOrder, ensureDefaults, getActiveProject, getConversationByClientId, getProjectByKey, getSettings, listConversations, listEvents, listInsights, listOrders, listProjects, updateSettings, getTraining, saveTraining, approveTraining, getInstantAnswers, refreshInstantAnswers, removeInstantAnswer, pauseConversation, recordOwnerMessageByWaId, captureLearnedAnswer, setAiProvider, resumeConversation, recordEvent, compileProjectSnapshot, listKnowledgeGaps, answerKnowledgeGap, listConversationSummaries, getShadowDraft, listShadowDrafts, settleShadowDraft, restoreShadowDraft } from "./module-db";
@@ -31,7 +32,7 @@ export const appRouter = router({
     settings: protectedProcedure.query(() => getSettings()),
   }),
   settings: router({
-    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
+    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional(), registrationNo: z.string().trim().max(60).optional(), nextDocumentNumber: z.number().int().min(1).max(99_999_999).optional(), defaultAdvancePercent: z.number().int().min(1).max(100).optional(), documentSettings: documentSettingsPatch.optional(), reminderSettings: reminderSettingsPatch.optional(), expenseCategories: z.array(z.string().trim().min(1).max(40)).min(1).max(30).optional(), templateReviewDismissed: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
     updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
@@ -123,6 +124,14 @@ export const appRouter = router({
     sendWeekly: protectedProcedure.mutation(async () => ({ delivered: await sendWeeklySummary() })),
   }),
   orders: router({ confirm: protectedProcedure.input(z.object({ orderKey: key })).mutation(async ({ input }) => (await confirmOrder(input.orderKey)) || refuse("PRECONDITION_FAILED", "Only an order with a received slip can be confirmed.")), }),
+  jobs: jobsRouter,
+  today: todayRouter,
+  meetings: meetingsRouter,
+  tasks: tasksRouter,
+  documents: documentsRouter,
+  ledger: ledgerRouter,
+  finance: financeRouter,
+  renewals: renewalsRouter,
   insights: router({ analyze: protectedProcedure.mutation(() => analyzeInsights()), approve: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]), detail: z.string().trim().min(3).max(4000).optional() })).mutation(({ input }) => setInsightStatus(input.id, "approved", input.detail)), dismiss: protectedProcedure.input(z.object({ id: z.union([z.string(), z.number().int()]) })).mutation(({ input }) => setInsightStatus(input.id, "dismissed")), }),
 });
 

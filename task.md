@@ -16,8 +16,8 @@ Here's the updated task list with your changes applied.
 - [x] Define Supabase tables: `projects`, `conversations`, `messages`, `settings`, `event_log`, and encrypted `baileys_auth_state`. `orders` is added by `002_orders_and_lockdown.sql`; there is no `users` table because the dashboard has no login.
 - [x] Build the ON/OFF switch runtime path. Settings, projects, conversations, usage counters, events, and takeover state now prefer Supabase when configured; apply the hosted migration before using production data.
 - [x] Build `/health` and `/healthz` endpoints. Connect cron-job.org after Render deployment.
-- [x] Dashboard has no login by choice — anyone with the link can open it, so treat the dashboard URL as the secret (don't share or index it). `/health` exposes no QR code or phone number.
-  - Optional: set `DASHBOARD_PASSWORD` in the server environment and the browser asks for that password (any user name) before the dashboard or its API can be used. Uptime checks (`/health`, `/healthz`, `/api/keepalive`) stay open. Leave it unset to keep the no-login behaviour.
+- [x] The dashboard is locked by a PIN (`DASHBOARD_PIN`): a PIN screen sets a signed, httpOnly session cookie (signed with `JWT_SECRET`), and the API and document downloads need it. There are no user accounts. `/health` exposes no QR code or phone number.
+  - Set `DASHBOARD_PIN` and `JWT_SECRET` in the server environment. In production nothing but `/health`, `/healthz`, `/api/keepalive` and the WhatsApp webhook is served until both are set (503 with a clear message). Wrong PINs are rate-limited with a growing lockout. `DASHBOARD_PASSWORD` (HTTP Basic) is deprecated and ignored.
 
 ## Phase 3 — AI conversation engine
 
