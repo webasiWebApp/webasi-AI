@@ -32,7 +32,7 @@ export const appRouter = router({
     settings: protectedProcedure.query(() => getSettings()),
   }),
   settings: router({
-    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional(), registrationNo: z.string().trim().max(60).optional(), nextDocumentNumber: z.number().int().min(1).max(99_999_999).optional(), defaultAdvancePercent: z.number().int().min(1).max(100).optional(), documentSettings: documentSettingsPatch.optional(), reminderSettings: reminderSettingsPatch.optional(), expenseCategories: z.array(z.string().trim().min(1).max(40)).min(1).max(30).optional(), templateReviewDismissed: z.boolean().optional() })).mutation(({ input }) => updateSettings(input)),
+    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional(), registrationNo: z.string().trim().max(60).optional(), nextDocumentNumber: z.number().int().min(1).max(99_999_999).optional(), defaultAdvancePercent: z.number().int().min(1).max(100).optional(), documentSettings: documentSettingsPatch.optional(), reminderSettings: reminderSettingsPatch.optional(), expenseCategories: z.array(z.string().trim().min(1).max(40)).min(1).max(30).optional(), templateReviewDismissed: z.boolean().optional(), replyLanguages: z.object({ english: z.boolean(), singlish: z.boolean(), sinhala: z.boolean() }).refine((languages) => languages.english || languages.singlish || languages.sinhala, "Keep at least one reply language on.").optional() })).mutation(({ input }) => updateSettings(input)),
     updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
@@ -107,10 +107,10 @@ export const appRouter = router({
       const snapshot = await compileProjectSnapshot(selected.projectKey);
       if (!snapshot) throw new TRPCError({ code: "NOT_FOUND", message: "Failed to compile project snapshot." });
       // Same lookup as a real chat, so the owner can see which questions are answered without the AI.
-      const instant = ["new", "collecting"].includes(input.state) ? matchFaqCache(input.incomingText, instantAnswersFor(snapshot), { englishForSinglish: ENV.faqEnglishForSinglish }) : null;
-      if (instant) return { reply: instantReplyText(instant, snapshot), extractedFields: {}, intent: "question", needsOwner: false, needsOwnerReason: null, reliedOnFacts: [], answeredFromFaqs: true };
       const settings = await getSettings();
-      return createConversationEngine({ project: snapshot, provider: settings.aiProvider }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
+      const instant = ["new", "collecting"].includes(input.state) ? matchFaqCache(input.incomingText, instantAnswersFor(snapshot), { englishForSinglish: ENV.faqEnglishForSinglish, replyLanguages: settings.replyLanguages }) : null;
+      if (instant) return { reply: instantReplyText(instant, snapshot), extractedFields: {}, intent: "question", needsOwner: false, needsOwnerReason: null, reliedOnFacts: [], answeredFromFaqs: true };
+      return createConversationEngine({ project: snapshot, provider: settings.aiProvider, replyLanguages: settings.replyLanguages }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
     }),
   }),
   whatsapp: router({

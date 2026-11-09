@@ -110,6 +110,8 @@ export function needsJudgement(text: string) {
   return NEEDS_JUDGEMENT.test(text);
 }
 
+import type { ReplyLanguages } from "../../shared/languages";
+
 export type Language = "english" | "singlish" | "other";
 
 // Coarse on purpose: it only has to keep an answer in one language away from a client writing in another.
@@ -275,8 +277,13 @@ function scorePhrasing(queryKeywords: Set<string>, phrasingKeywords: Set<string>
 export function matchFaqCache(
   incomingText: string,
   cache: FaqCache,
-  { threshold = MATCH_THRESHOLD, englishForSinglish = false }: { threshold?: number; englishForSinglish?: boolean } = {},
+  { threshold = MATCH_THRESHOLD, englishForSinglish = false, replyLanguages }: { threshold?: number; englishForSinglish?: boolean; replyLanguages?: ReplyLanguages } = {},
 ): FaqMatch | null {
+  // An answer written in a language the owner switched off is never sent. A Singlish question may still get the
+  // English answer when Singlish replies are off, the same way the AI would answer it.
+  if (replyLanguages && !replyLanguages.singlish && replyLanguages.english) englishForSinglish = true;
+  // "other" is non-Latin script, which for these clients is Sinhala.
+  const answerAllowed = (language: Language) => !replyLanguages || replyLanguages[language === "other" ? "sinhala" : language];
   if (!cache || cache.length === 0) return null;
   if (incomingText.length > MAX_QUESTION_LENGTH || needsJudgement(incomingText)) return null;
 
@@ -288,6 +295,7 @@ export function matchFaqCache(
   let best: FaqMatch | null = null;
 
   for (const { entry, language, keywords, subject } of phrasings) {
+    if (!answerAllowed(language)) continue;
     if (language !== queryLanguage && !(englishForSinglish && queryLanguage === "singlish" && language === "english")) continue;
     if (subject && !Array.from(subject).some((kw) => queryKeywords.has(kw))) continue;
     const score = scorePhrasing(queryKeywords, keywords, known);

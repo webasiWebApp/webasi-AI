@@ -5,6 +5,7 @@ import { invokeGroq } from "../_core/groq";
 import type { InvokeOptions } from "../_core/rate-limit";
 import { approvedRestaurantProject, type ApprovedProjectSnapshot } from "./project";
 import { shouldSendReply, type OrderState } from "../../shared/webasi";
+import { allReplyLanguagesOn, DEFAULT_REPLY_LANGUAGES, REPLY_LANGUAGE_LABELS, REPLY_LANGUAGES, replyLanguageFor, type ReplyLanguages } from "../../shared/languages";
 
 export type IntentScore = "high" | "medium" | "low";
 export type Sentiment = "positive" | "neutral" | "confused" | "frustrated";
@@ -236,14 +237,24 @@ function sriLankaTime(now: Date) {
   return sriLankaFormatter.format(now);
 }
 
-export function buildSystemPrompt(project: ApprovedProjectSnapshot, turn: Pick<ConversationTurn, "now" | "daysSinceLastMessage">) {
+// With every language on, the reply mirrors the client. Otherwise the prompt names the allowed languages and,
+// for each one switched off, the language to answer in instead.
+function languageRule(languages: ReplyLanguages) {
+  const example = `Example Singlish: "Price kohomd?" -> "Hi! Package eka LKR 5,000 wenawa. Details ewannada?"`;
+  if (allReplyLanguagesOn(languages)) return `- Mirror the client: reply in the same language and script (English, Singlish, Sinhala or Tamil) and the same level of formality. Use emojis only if the client does, and sparingly. ${example}`;
+  const allowed = REPLY_LANGUAGES.filter((language) => languages[language]);
+  const instead = REPLY_LANGUAGES.filter((language) => !languages[language]).map((language) => `if the client writes in ${REPLY_LANGUAGE_LABELS[language]}, reply in ${REPLY_LANGUAGE_LABELS[replyLanguageFor(language, languages)]}`).join("; ");
+  return `- Reply ONLY in ${allowed.map((language) => REPLY_LANGUAGE_LABELS[language]).join(" or ")} (Singlish means Sinhala written in English letters; Sinhala means Sinhala script). When the client writes in one of these, use the same one. Otherwise: ${instead}. Never reply in a language that is not allowed, even if the client asks. Match the client's level of formality. Use emojis only if the client does, and sparingly.${languages.singlish ? ` ${example}` : ""}`;
+}
+
+export function buildSystemPrompt(project: ApprovedProjectSnapshot, turn: Pick<ConversationTurn, "now" | "daysSinceLastMessage">, languages: ReplyLanguages = DEFAULT_REPLY_LANGUAGES) {
   const returning = turn.daysSinceLastMessage && turn.daysSinceLastMessage >= 1 ? `\nThe client is coming back after about ${Math.round(turn.daysSinceLastMessage)} day(s); acknowledge that naturally instead of greeting them like a stranger.` : "";
   return `You are chatting on WhatsApp on behalf of ${project.businessName}, helping a potential client with the ${project.packageName}. Current time in Sri Lanka: ${sriLankaTime(turn.now ?? new Date())}.${returning}
 
 HOW TO WRITE (this matters most):
 - Text like a friendly, professional person on WhatsApp: short messages, usually 1–3 sentences. No markdown, no headings, no em dashes, no bullet lists unless the client asks for the full list of what is included.
 - Answer what the client asked first, in your first sentence, then move the chat forward.
-- Mirror the client: reply in the same language and script (English, Singlish, Sinhala or Tamil) and the same level of formality. Use emojis only if the client does, and sparingly. Example Singlish: "Price kohomd?" -> "Hi! Package eka LKR 5,000 wenawa. Details ewannada?"
+${languageRule(languages)}
 - React to what they actually said before moving on. Do not repeat greetings or re-introduce yourself mid-chat. Vary your wording; never sound scripted.
 - Ask at most one question per message. Never ask for something that is already in knownDetails or that the client already told you in recentMessages.
 - If the client is only saying thanks, ok or goodbye, reply briefly and warmly and do not push another question.
@@ -301,7 +312,7 @@ export function modelForProvider(provider: string = ENV.aiProvider, options?: Pi
   };
 }
 
-export function createConversationEngine({ project = approvedRestaurantProject, provider, callModel = modelForProvider(provider) }: { project?: ApprovedProjectSnapshot; provider?: Provider | string; callModel?: typeof invokeLLM } = {}): ConversationEngine {
+export function createConversationEngine({ project = approvedRestaurantProject, provider, callModel = modelForProvider(provider), replyLanguages = DEFAULT_REPLY_LANGUAGES }: { project?: ApprovedProjectSnapshot; provider?: Provider | string; callModel?: typeof invokeLLM; replyLanguages?: ReplyLanguages } = {}): ConversationEngine {
   // Resolved once per engine instead of recomputed on every turn (see memoized
   // projectFacts/allowedNumbers above for why this is safe and cheap either way,
   // but pinning it here avoids even the WeakMap lookup on the hot path).
@@ -319,7 +330,7 @@ export function createConversationEngine({ project = approvedRestaurantProject, 
       }
 
       const messages: Message[] = [
-        { role: "system", content: buildSystemPrompt(project, turn) },
+        { role: "system", content: buildSystemPrompt(project, turn, replyLanguages) },
         {
           role: "user",
           content: JSON.stringify({
@@ -383,12 +394,12 @@ const followUpSchema = {
 
 // One gentle nudge for a client who went quiet. Returns null if the model fails or breaks the grounding rules,
 // so the caller can fall back to a fixed message.
-export async function draftFollowUp({ project, recentMessages, clientName, clientNotes, orderState, objection, now = new Date(), callModel = modelForProvider() }: { project: ApprovedProjectSnapshot; recentMessages: Array<{ role: string; text: string }>; clientName?: string; clientNotes?: string; orderState: OrderState; objection?: Objection | null; now?: Date; callModel?: typeof invokeLLM }): Promise<string | null> {
+export async function draftFollowUp({ project, recentMessages, clientName, clientNotes, orderState, objection, now = new Date(), callModel = modelForProvider(), replyLanguages = DEFAULT_REPLY_LANGUAGES }: { project: ApprovedProjectSnapshot; recentMessages: Array<{ role: string; text: string }>; clientName?: string; clientNotes?: string; orderState: OrderState; objection?: Objection | null; now?: Date; callModel?: typeof invokeLLM; replyLanguages?: ReplyLanguages }): Promise<string | null> {
   const task = `\n\nTASK NOW: The client stopped replying after your last message. Write ONE short, warm follow-up (1–2 sentences) in the client's language that picks up exactly where the chat left off. Low pressure, no new facts, no discounts, no urgency tricks. ${orderState === "awaiting_deposit" ? "They have the deposit details; gently offer help with the next step." : objection === "price" ? "Acknowledge budget concerns and ask if they'd like to look at a smaller scope." : objection === "timeline" ? "Acknowledge timeline concerns and see if they want to proceed." : "Offer to answer any questions or continue when they're ready."} Return JSON {"reply": "..."}.`;
   try {
     const response = await callModel({
       model: ENV.webasiLlmModel, max_tokens: 300, response_format: followUpSchema,
-      messages: [{ role: "system", content: buildSystemPrompt(project, { now }) + task }, { role: "user", content: JSON.stringify({ clientName: clientName ?? null, previousNotes: clientNotes ?? "", recentMessages }) }],
+      messages: [{ role: "system", content: buildSystemPrompt(project, { now }, replyLanguages) + task }, { role: "user", content: JSON.stringify({ clientName: clientName ?? null, previousNotes: clientNotes ?? "", recentMessages }) }],
     });
     const content = response.choices[0]?.message?.content;
     const parsed = content ? parseStructured(content) : null;

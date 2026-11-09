@@ -11,15 +11,17 @@ import { notifyOwner } from "../_core/notification";
 import { baileysTransport } from "../whatsapp/baileys";
 import { matchFaqCache } from "./faq-cache";
 import { instantAnswersFor, instantReplyText } from "./faq-generator";
+import { mergeReplyLanguages, type ReplyLanguages } from "../../shared/languages";
 
 // compileProjectSnapshot returns the same object until the project, its training or the settings change,
 // so object identity is what says the engine (and the facts it has prepared) is still current.
-let _cachedEngine: { project: ApprovedProjectSnapshot | null; provider: string; engine: ReturnType<typeof createConversationEngine> } | null = null;
+let _cachedEngine: { project: ApprovedProjectSnapshot | null; provider: string; languages: string; engine: ReturnType<typeof createConversationEngine> } | null = null;
 let _lastUsageAlertAt = 0;
 
-function engineFor(project: ApprovedProjectSnapshot | null, provider: string) {
-  if (!_cachedEngine || _cachedEngine.project !== project || _cachedEngine.provider !== provider) {
-    _cachedEngine = { project, provider, engine: createConversationEngine({ project: project ?? undefined, provider }) };
+function engineFor(project: ApprovedProjectSnapshot | null, provider: string, replyLanguages: ReplyLanguages) {
+  const languages = JSON.stringify(replyLanguages);
+  if (!_cachedEngine || _cachedEngine.project !== project || _cachedEngine.provider !== provider || _cachedEngine.languages !== languages) {
+    _cachedEngine = { project, provider, languages, engine: createConversationEngine({ project: project ?? undefined, provider, replyLanguages }) };
   }
   return _cachedEngine.engine.runTurn;
 }
@@ -194,7 +196,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
     // Look the question up in the owner's FAQs and the generated client FAQs before touching the LLM.
     // Only while the conversation is still gathering information; from the deposit step on, every
     // message goes through the engine.
-    const instant = project && ["new", "collecting"].includes(snapshot.state) ? matchFaqCache(incomingText, instantAnswersFor(project), { englishForSinglish: ENV.faqEnglishForSinglish }) : null;
+    const instant = project && ["new", "collecting"].includes(snapshot.state) ? matchFaqCache(incomingText, instantAnswersFor(project), { englishForSinglish: ENV.faqEnglishForSinglish, replyLanguages: mergeReplyLanguages(settings.replyLanguages) }) : null;
     if (instant && project) {
       replyText = instantReplyText(instant, project, snapshot.extractedFields);
       answeredFromFaqs = true;
@@ -205,7 +207,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       // Cached answers above cost no AI request, so the daily AI limit only stops the turns that need one.
       if (counts.geminiRequests >= settings.geminiDailyCap) return usageStop("daily AI");
       try {
-        const runEngine = deps.runEngine ?? engineFor(project, settings.aiProvider);
+        const runEngine = deps.runEngine ?? engineFor(project, settings.aiProvider, mergeReplyLanguages(settings.replyLanguages));
         if (!settings.shadowMode && deps.onReplying) later("typing indicator", deps.onReplying());
         structured = await runEngine({
           clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages.slice(0, -1).map(({ role, text }) => ({ role, text })),

@@ -67,7 +67,7 @@ export async function runFollowUps(now = new Date()) {
     if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) break;
     const name = chat.extractedFields?.clientName ?? chat.profileName;
     const aiAllowed = counts.geminiRequests < settings.geminiDailyCap;
-    const drafted = aiAllowed ? await draftFollowUp({ project, recentMessages, clientName: name, clientNotes: chat.clientNotes, orderState: chat.state as OrderState, now, callModel: modelForProvider(settings.aiProvider) }) : null;
+    const drafted = aiAllowed ? await draftFollowUp({ project, recentMessages, clientName: name, clientNotes: chat.clientNotes, orderState: chat.state as OrderState, now, callModel: modelForProvider(settings.aiProvider), replyLanguages: settings.replyLanguages }) : null;
     if (aiAllowed) await incrementUsage("geminiRequests");
     const text = drafted ?? fallbackFollowUp(chat.state, name);
     if (settings.shadowMode) {
