@@ -5,8 +5,20 @@ const mapEvent = (row: any) => ({ ...row, eventType: row.event_type, clientId: r
 
 export async function recordEvent(input: { eventType: string; severity?: "info" | "warning" | "error"; title: string; detail: string; clientId?: string }) {
   if (!hasDatabase()) return;
-  const { error } = await getSupabaseServer().from("event_log").insert({ event_type: input.eventType, severity: input.severity ?? "info", title: input.title, detail: input.detail, client_id: input.clientId ?? null });
-  if (error) throw error;
+  const row = { event_type: input.eventType, severity: input.severity ?? "info", title: input.title, detail: input.detail, client_id: input.clientId ?? null };
+  // A keep-alive socket that Supabase closed while idle ("fetch failed", UND_ERR_SOCKET) fails the first write, mostly right
+  // after a cold start. The next attempt opens a fresh socket, so retry once before losing the log row.
+  let error: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      ({ error } = await getSupabaseServer().from("event_log").insert(row));
+    } catch (thrown) {
+      error = thrown;
+    }
+    if (!error) return;
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw error;
 }
 
 export async function listEvents() {
