@@ -2,8 +2,8 @@ import { DisconnectReason, Browsers, jidNormalizedUser, makeWASocket, normalizeM
 import pino from "pino";
 import { createDatabaseAuthState, saveBaileysCreds, hasBaileysSession, clearBaileysSession } from "./baileys-auth";
 import { ENV } from "../_core/env";
-import { processWhatsAppMessage } from "../conversations/processor";
-import { captureLearnedAnswer, pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId } from "../module-db";
+import { internalClientId, processWhatsAppMessage } from "../conversations/processor";
+import { captureLearnedAnswer, pauseConversationByWaId, recordEvent, recordOwnerMessageByWaId, startOwnerChatByWaId } from "../module-db";
 import { notifyOwner } from "../_core/notification";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
 import { createChatQueue } from "./chat-queue";
@@ -199,7 +199,7 @@ class BaileysTransport {
           const echo = normalizeMessageContent(message.message);
           const ownerText = echo?.conversation ?? echo?.extendedTextMessage?.text ?? "";
           await pauseConversationByWaId(waId);
-          if (ownerText) { await captureLearnedAnswer(waId, ownerText); await recordOwnerMessageByWaId(waId, ownerText); }
+          if (ownerText) { await captureLearnedAnswer(waId, ownerText); if (!await recordOwnerMessageByWaId(waId, ownerText)) await startOwnerChatByWaId(internalClientId(waId), waId, ownerText); }
         }
         return;
       }

@@ -59,6 +59,18 @@ export async function recordOwnerMessageByWaId(waId: string, text: string) {
   return true;
 }
 
+// A chat the owner started from the phone has no conversation yet, so the dashboard would never list it. This adds it, paused
+// so WEBASI stays out of it, with the owner's message as its first line. If the client's own message created the chat in the
+// meantime, the message is added to that one instead.
+export async function startOwnerChatByWaId(clientId: string, waId: string, text: string) {
+  const normalized = text.trim();
+  if (!hasDatabase() || !normalized) return false;
+  const { error } = await getSupabaseServer().from("conversations").insert({ client_id: clientId, wa_id: waId, state: "new", is_paused: true, missing_fields: [], extracted_fields: {}, recent_messages: [{ role: "owner", text: normalized, at: new Date().toISOString() }] });
+  if (!error) { await recordEvent({ eventType: "owner_chat_started", severity: "info", title: "Chat started from the phone", detail: "You messaged a new number from the phone; the chat was added paused.", clientId }); return true; }
+  if (error.code !== "23505") throw error;
+  return recordOwnerMessageByWaId(waId, normalized);
+}
+
 export async function captureLearnedAnswer(waId: string, ownerText: string) {
   if (!hasDatabase() || ownerText.trim().length < 3) return false;
   const supabase = getSupabaseServer();

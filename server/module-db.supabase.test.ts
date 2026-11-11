@@ -261,6 +261,14 @@ describe("conversations", () => {
     await expect(moduleDb.recordOwnerMessageByWaId("94779990000", "Hello")).resolves.toBe(false);
   });
 
+  it("adds a chat the owner started from the phone as a paused conversation, and joins an existing one", async () => {
+    await expect(moduleDb.startOwnerChatByWaId("c9", "94775291371", " Project is on going ")).resolves.toBe(true);
+    expect(db.rows("conversations")[0]).toMatchObject({ client_id: "c9", wa_id: "94775291371", is_paused: true, recent_messages: [{ role: "owner", text: "Project is on going" }] });
+    await expect(moduleDb.startOwnerChatByWaId("c9", "94775291371", "Second message")).resolves.toBe(true);
+    expect(db.rows("conversations")).toHaveLength(1);
+    expect(db.rows("conversations")[0].recent_messages.map((m: any) => m.text)).toEqual(["Project is on going", "Second message"]);
+  });
+
   it("lists chats for the dashboard without their transcripts", async () => {
     db.seed("conversations", chat({ handed_over: true, recent_messages: [{ role: "client", text: "price kiyada?" }, { role: "assistant", text: "It depends on what you need. " + "x".repeat(400) }] }));
     const [summary] = await moduleDb.listConversationSummaries();

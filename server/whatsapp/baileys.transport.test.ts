@@ -10,6 +10,7 @@ const world = vi.hoisted(() => ({
   pause: vi.fn(async (_waId: string) => true),
   capture: vi.fn(async (_waId: string, _text: string) => false),
   recordOwner: vi.fn(async (_waId: string, _text: string) => true),
+  startOwnerChat: vi.fn(async (_clientId: string, _waId: string, _text: string) => true),
   clearSession: vi.fn(async () => undefined),
 }));
 
@@ -34,9 +35,9 @@ vi.mock("baileys", async () => {
   };
 });
 vi.mock("./baileys-auth", () => ({ createDatabaseAuthState: async () => ({ creds: world.creds, keys: {} }), saveBaileysCreds: async () => undefined, hasBaileysSession: async () => false, clearBaileysSession: world.clearSession }));
-vi.mock("../module-db", () => ({ recordEvent: world.recordEvent, pauseConversationByWaId: world.pause, captureLearnedAnswer: world.capture, recordOwnerMessageByWaId: world.recordOwner }));
+vi.mock("../module-db", () => ({ recordEvent: world.recordEvent, pauseConversationByWaId: world.pause, captureLearnedAnswer: world.capture, recordOwnerMessageByWaId: world.recordOwner, startOwnerChatByWaId: world.startOwnerChat }));
 vi.mock("../_core/notification", () => ({ notifyOwner: world.notifyOwner }));
-vi.mock("../conversations/processor", () => ({ processWhatsAppMessage: world.process }));
+vi.mock("../conversations/processor", () => ({ processWhatsAppMessage: world.process, internalClientId: (waId: string) => `client_${waId}` }));
 
 let transport: typeof import("./baileys").baileysTransport;
 const tick = (ms = 0) => vi.advanceTimersByTimeAsync(ms);
@@ -59,7 +60,7 @@ beforeEach(async () => {
   vi.resetModules();
   world.sockets.length = 0;
   world.creds = { registered: false };
-  for (const mock of [world.recordEvent, world.notifyOwner, world.process, world.pause, world.capture, world.recordOwner, world.clearSession]) mock.mockClear();
+  for (const mock of [world.recordEvent, world.notifyOwner, world.process, world.pause, world.capture, world.recordOwner, world.startOwnerChat, world.clearSession]) mock.mockClear();
   transport = (await import("./baileys")).baileysTransport;
 });
 afterEach(() => vi.useRealTimers());
@@ -199,6 +200,15 @@ describe("inbound messages", () => {
     expect(world.recordOwner).toHaveBeenCalledWith("94770001111", "I'll call you at 5");
     await tick(10_000);
     expect(world.process).not.toHaveBeenCalled();
+  });
+
+  it("adds a chat the owner started from the phone, paused, when it has no conversation yet", async () => {
+    world.recordOwner.mockResolvedValueOnce(false);
+    const socket = await connected();
+    await deliver(socket, [inbound("owner-2", "Hi, how can we help you?", { fromMe: true })]);
+    expect(world.startOwnerChat).toHaveBeenCalledWith("client_94770001111", "94770001111", "Hi, how can we help you?");
+    await deliver(socket, [inbound("owner-3", "and again", { fromMe: true })]);
+    expect(world.startOwnerChat).toHaveBeenCalledOnce();
   });
 
   it("ignores groups, status updates, the owner's own chat, reactions and history that is not a new message", async () => {
