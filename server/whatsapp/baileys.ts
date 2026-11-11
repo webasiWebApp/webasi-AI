@@ -46,6 +46,13 @@ export function splitIntoBubbles(body: string, maxParts = 3) {
 export function typingDelayMs(text: string) { return Math.min(7000, Math.max(1500, 1000 + text.length * 35)); }
 export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
+const OFFLINE_BACKFILL_MS = 24 * 60 * 60 * 1000;
+// Only messages from the last day are replayed after an outage: older ones are history the client no longer expects an answer to.
+function isRecentOfflineMessage(message: WAMessage) {
+  const seconds = Number(message.messageTimestamp ?? 0);
+  return seconds > 0 && Date.now() - seconds * 1000 < OFFLINE_BACKFILL_MS;
+}
+
 class BaileysTransport {
   private socket: ReturnType<typeof makeWASocket> | null = null;
   private starting: Promise<void> | null = null;
@@ -121,7 +128,9 @@ class BaileysTransport {
     this.socket = socket;
     socket.ev.on("creds.update", () => saveBaileysCreds(auth.creds).catch((error) => console.error("[Baileys] credential persistence failed", error)));
     socket.ev.on("connection.update", (update) => this.handleConnection(update, auth, socket).catch((error) => console.error("[Baileys] connection update failed", error)));
-    socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); });
+    // "append" is what Baileys calls messages WhatsApp held back while this server was offline. Dropping them left the dashboard
+    // missing everything sent during an outage; the database already ignores a message id it has seen, so replaying is safe.
+    socket.ev.on("messages.upsert", ({ messages, type }) => { if (type === "notify") this.enqueueInbound(messages); else if (type === "append") this.enqueueInbound(messages.filter(isRecentOfflineMessage)); });
     if (!auth.creds.registered) {
       this.status = "pairing";
     }

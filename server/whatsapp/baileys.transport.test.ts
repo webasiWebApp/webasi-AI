@@ -183,6 +183,15 @@ describe("inbound messages", () => {
     expect(world.process.mock.calls[0][0]).toMatchObject({ id: "m2", waId: "94770001111", profileName: "Nimal", type: "text", text: { body: "hi\nprice?" } });
   });
 
+  it("processes messages held back while the server was offline, but only recent ones", async () => {
+    const socket = await connected();
+    const sent = (hoursAgo: number) => ({ messageTimestamp: Math.floor((Date.now() - hoursAgo * 3_600_000) / 1000) });
+    await deliver(socket, [{ ...inbound("old", "week-old question"), ...sent(48) }, { ...inbound("missed", "are you open?"), ...sent(9) }], "append");
+    await tick(6000);
+    expect(world.process).toHaveBeenCalledOnce();
+    expect(world.process.mock.calls[0][0]).toMatchObject({ id: "missed", text: { body: "are you open?" } });
+  });
+
   it("pauses the chat and keeps the text when the owner replies from the phone", async () => {
     const socket = await connected();
     await deliver(socket, [inbound("owner-1", "I'll call you at 5", { fromMe: true })]);
