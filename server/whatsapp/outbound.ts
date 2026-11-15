@@ -16,3 +16,14 @@ export async function sendWhatsAppText(input: { to: string; body: string; humani
 export function canSendWhatsApp(): boolean {
   return ENV.whatsappTransport === "baileys" ? baileysTransport.isConnected() : Boolean(ENV.whatsappPhoneNumberId && ENV.whatsappAccessToken);
 }
+
+// A picture with a caption. Only the linked-device transport can send one; the Cloud API path reports it as not
+// sent, and the caller falls back to text.
+export async function sendWhatsAppImage(input: { to: string; image: string; caption: string }): Promise<SendTextResult> {
+  if (ENV.whatsappTransport !== "baileys") return { accepted: false, reason: "image_unsupported" };
+  try {
+    return await baileysTransport.sendImage(input);
+  } catch (error) {
+    return { accepted: false, reason: `send_failed: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}

@@ -22,6 +22,7 @@ vi.mock("./module-db", () => ({
   getActiveProject: async () => ({ projectKey: "mine" }),
   compileProjectSnapshot: async () => ({ id: "mine", packageName: "Site", priceLkr: 0, depositPercent: 0, timelineBusinessDays: "" }),
   listConversations: async () => state.chats,
+  getConversationByClientId: async (clientId: string) => state.chats.find((chat) => chat.clientId === clientId) ?? null,
   recordEvent: state.recordEvent,
   recordFollowUp: state.recordFollowUp,
   getWeeklyStats: async () => null,
@@ -34,7 +35,7 @@ vi.mock("./db", () => ({ getUsageCounts: async () => state.usage, incrementUsage
 vi.mock("./whatsapp/baileys", () => ({ baileysTransport: { isConnected: () => state.connected, sendText: state.sendText, sendToSelf: async () => true } }));
 vi.mock("./conversations/engine", () => ({ draftFollowUp: state.draftFollowUp, modelForProvider: () => vi.fn() }));
 
-const { runFollowUps, runHandoverReminders, runRetention, waitingOnOwner } = await import("./automation");
+const { runFollowUps, runHandoverReminders, runRetention, sendManualFollowUp, waitingOnOwner } = await import("./automation");
 const { ENV } = await import("./_core/env");
 
 // Monday 10:00 in Colombo.
@@ -193,5 +194,27 @@ describe("follow-up run", () => {
     expect(await runFollowUps(now)).toBe(0);
     expect(events()).toEqual(["send_failed"]);
     expect(state.recordFollowUp).not.toHaveBeenCalled();
+  });
+});
+
+describe("manual follow-up from the dashboard", () => {
+  it("sends now, even when the chat is not due, is paused, or shadow mode is on", async () => {
+    state.chats = [quietChat({ isPaused: true, lastClientMessageAt: new Date(now.getTime() - 3_600_000).toISOString() })];
+    state.settings.shadowMode = true;
+    expect(await sendManualFollowUp("c1", now)).toEqual({ accepted: true, text: "Hi Nimal, still thinking about the site?" });
+    expect(state.sendText).toHaveBeenCalledOnce();
+    expect(state.recordFollowUp).toHaveBeenCalledWith("c1", "Hi Nimal, still thinking about the site?", now);
+    expect(events()).toEqual(["follow_up_sent"]);
+  });
+
+  it("refuses without spending anything when WhatsApp is disconnected, at the monthly limit, or the chat is gone", async () => {
+    state.connected = false;
+    expect(await sendManualFollowUp("c1", now)).toEqual({ accepted: false, reason: "whatsapp_disconnected" });
+    state.connected = true;
+    state.usage.outboundWhatsApp = 900;
+    expect((await sendManualFollowUp("c1", now)).reason).toBe("whatsapp_usage_hard_stop");
+    expect((await sendManualFollowUp("missing", now)).reason).toBe("conversation_not_found");
+    expect(state.draftFollowUp).not.toHaveBeenCalled();
+    expect(state.sendText).not.toHaveBeenCalled();
   });
 });

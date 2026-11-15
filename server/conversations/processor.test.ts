@@ -80,3 +80,28 @@ describe("WhatsApp sender", () => {
     expect(outboundCapAllows(810, 900)).toBe(false);
   });
 });
+
+describe("small talk", () => {
+  const deps = (overrides: Record<string, unknown>) => ({ claimMessage: async () => true, saveConversation: async () => undefined, getUsageCounts: async () => ({ outboundWhatsApp: 10, geminiRequests: 2 }), incrementUsage: async () => undefined, recordEvent: async () => undefined, isOn: true, ...overrides }) as any;
+
+  it("reacts to 'thanks' instead of running the engine, once the chat has had a reply", async () => {
+    const runEngine = vi.fn();
+    const react = vi.fn().mockResolvedValue(true);
+    const sendText = vi.fn();
+    const current = snapshot({ recentMessages: [{ role: "client", text: "price?", at: "2026-11-14T10:00:00Z" }, { role: "assistant", text: "LKR 50,000.", at: "2026-11-14T10:00:05Z" }] });
+    const result = await processWhatsAppMessage(message({ id: "wamid.thanks-1", text: { body: "Thanks a lot 🙏" } }), deps({ getConversation: async () => current, runEngine, react, sendText }));
+    expect(result).toMatchObject({ replied: true, reason: "small_talk_reaction" });
+    expect(react).toHaveBeenCalledWith({ to: "94770001111", emoji: "🙏" });
+    expect(runEngine).not.toHaveBeenCalled();
+    expect(sendText).not.toHaveBeenCalled();
+  });
+
+  it("still lets the engine greet a client whose first message is 'ok'", async () => {
+    const runEngine = vi.fn().mockResolvedValue({ reply: "Hi! How can I help?", extractedFields: {}, intent: "greeting", needsOwner: false, needsOwnerReason: null, reliedOnFacts: [] });
+    const react = vi.fn();
+    const result = await processWhatsAppMessage(message({ id: "wamid.ok-1", text: { body: "ok" } }), deps({ getConversation: async () => snapshot(), runEngine, react, sendText: vi.fn().mockResolvedValue({ accepted: true }) }));
+    expect(result.replied).toBe(true);
+    expect(react).not.toHaveBeenCalled();
+    expect(runEngine).toHaveBeenCalledOnce();
+  });
+});

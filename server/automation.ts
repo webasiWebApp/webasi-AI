@@ -1,7 +1,7 @@
 import { ENV } from "./_core/env";
 import { notifyOwner } from "./_core/notification";
 import { getUsageCounts, incrementUsage, logMessage } from "./db";
-import { compileProjectSnapshot, deleteOlderThan, eventsSince, getActiveProject, getSettings, getWeeklyStats, lastEventAt, listConversations, recordEvent, recordFollowUp, type WeeklyStats } from "./module-db";
+import { compileProjectSnapshot, deleteOlderThan, eventsSince, getActiveProject, getConversationByClientId, getSettings, getWeeklyStats, lastEventAt, listConversations, recordEvent, recordFollowUp, type WeeklyStats } from "./module-db";
 import { draftFollowUp, modelForProvider } from "./conversations/engine";
 import { outboundCapAllows } from "./conversations/sender";
 import { canSendWhatsApp, sendWhatsAppText } from "./whatsapp/outbound";
@@ -61,29 +61,50 @@ export async function runFollowUps(now = new Date()) {
   if (!project) return 0;
   let sent = 0;
   for (const chat of await listConversations()) {
-    const recentMessages = parseTranscript(chat.recentMessages);
-    if (!dueForFollowUp({ ...chat, recentMessages }, now)) continue;
-    const counts = await getUsageCounts();
-    if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) break;
-    const name = chat.extractedFields?.clientName ?? chat.profileName;
-    const aiAllowed = counts.geminiRequests < settings.geminiDailyCap;
-    const drafted = aiAllowed ? await draftFollowUp({ project, recentMessages, clientName: name, clientNotes: chat.clientNotes, orderState: chat.state as OrderState, now, callModel: modelForProvider(settings.aiProvider), replyLanguages: settings.replyLanguages }) : null;
-    if (aiAllowed) await incrementUsage("geminiRequests");
-    const text = drafted ?? fallbackFollowUp(chat.state, name);
-    if (settings.shadowMode) {
-      await recordEvent({ eventType: "shadow_draft", title: "Shadow-mode follow-up draft", detail: text, clientId: chat.clientId });
-      await recordFollowUp(chat.clientId, null, now);
-      continue;
-    }
-    const result = await sendWhatsAppText({ to: chat.waId, body: text, humanize: true });
-    if (!result.accepted) { await recordEvent({ eventType: "send_failed", severity: "error", title: "Follow-up not delivered", detail: result.reason ?? "unknown error", clientId: chat.clientId }); continue; }
-    for (let part = 0; part < (result.parts ?? 1); part++) await incrementUsage("outboundWhatsApp");
-    await recordFollowUp(chat.clientId, text, now);
-    await logMessage({ messageId: result.messageId ?? `followup-${chat.clientId}-${now.getTime()}`, clientId: chat.clientId, waId: chat.waId, role: "assistant", body: text, topic: "follow_up" }).catch(() => undefined);
-    await recordEvent({ eventType: "follow_up_sent", title: "Follow-up sent", detail: `Nudged ${chat.profileName ?? "a client"} after they went quiet: ${text}`, clientId: chat.clientId });
-    sent++;
+    if (!dueForFollowUp({ ...chat, recentMessages: parseTranscript(chat.recentMessages) }, now)) continue;
+    const result = await sendFollowUp(chat, project, settings, now, settings.shadowMode);
+    if (result.reason === "whatsapp_usage_hard_stop") break;
+    if (result.accepted && !settings.shadowMode) sent++;
   }
   return sent;
+}
+
+type FollowUpChat = Awaited<ReturnType<typeof listConversations>>[number];
+type FollowUpSettings = Awaited<ReturnType<typeof getSettings>>;
+
+// Drafts (AI, or the template when the AI budget is spent) and sends one follow-up. shadow = save as a draft instead.
+async function sendFollowUp(chat: FollowUpChat, project: NonNullable<Awaited<ReturnType<typeof compileProjectSnapshot>>>, settings: FollowUpSettings, now: Date, shadow: boolean, manual = false): Promise<{ accepted: boolean; reason?: string; text?: string }> {
+  const recentMessages = parseTranscript(chat.recentMessages);
+  const counts = await getUsageCounts();
+  if (!outboundCapAllows(counts.outboundWhatsApp, settings.whatsappMonthlyCap)) return { accepted: false, reason: "whatsapp_usage_hard_stop" };
+  const name = chat.extractedFields?.clientName ?? chat.profileName;
+  const aiAllowed = counts.geminiRequests < settings.geminiDailyCap;
+  const drafted = aiAllowed ? await draftFollowUp({ project, recentMessages, clientName: name, clientNotes: chat.clientNotes, orderState: chat.state as OrderState, now, callModel: modelForProvider(settings.aiProvider), replyLanguages: settings.replyLanguages }) : null;
+  if (aiAllowed) await incrementUsage("geminiRequests");
+  const text = drafted ?? fallbackFollowUp(chat.state, name);
+  if (shadow) {
+    await recordEvent({ eventType: "shadow_draft", title: "Shadow-mode follow-up draft", detail: text, clientId: chat.clientId });
+    await recordFollowUp(chat.clientId, null, now);
+    return { accepted: true, text };
+  }
+  const result = await sendWhatsAppText({ to: chat.waId, body: text, humanize: true });
+  if (!result.accepted) { await recordEvent({ eventType: "send_failed", severity: "error", title: "Follow-up not delivered", detail: result.reason ?? "unknown error", clientId: chat.clientId }); return { accepted: false, reason: result.reason ?? "whatsapp_send_failed" }; }
+  for (let part = 0; part < (result.parts ?? 1); part++) await incrementUsage("outboundWhatsApp");
+  await recordFollowUp(chat.clientId, text, now);
+  await logMessage({ messageId: result.messageId ?? `followup-${chat.clientId}-${now.getTime()}`, clientId: chat.clientId, waId: chat.waId, role: "assistant", body: text, topic: "follow_up" }).catch(() => undefined);
+  await recordEvent({ eventType: "follow_up_sent", title: manual ? "Follow-up sent by owner" : "Follow-up sent", detail: manual ? `Owner sent a follow-up to ${chat.profileName ?? "a client"}: ${text}` : `Nudged ${chat.profileName ?? "a client"} after they went quiet: ${text}`, clientId: chat.clientId });
+  return { accepted: true, text };
+}
+
+// The owner's "Send follow-up" button: skips the timing rules and shadow mode, since the owner asked for it now.
+export async function sendManualFollowUp(clientId: string, now = new Date()): Promise<{ accepted: boolean; reason?: string; text?: string }> {
+  const chat = await getConversationByClientId(clientId);
+  if (!chat) return { accepted: false, reason: "conversation_not_found" };
+  if (!canSendWhatsApp()) return { accepted: false, reason: "whatsapp_disconnected" };
+  const active = await getActiveProject();
+  const project = active ? await compileProjectSnapshot(active.projectKey) : null;
+  if (!project) return { accepted: false, reason: "no_active_project" };
+  return sendFollowUp(chat, project, await getSettings(), now, false, true);
 }
 
 // A client waits on the owner when WEBASI will not answer the chat (handed over, or paused by the owner) and the

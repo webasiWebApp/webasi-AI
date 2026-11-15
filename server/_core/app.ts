@@ -92,6 +92,8 @@ export function createApp(options: AppOptions = {}): Express {
   registerDocumentRoutes(app);
 
   // The dashboard only sends small JSON payloads; a large limit is a free memory-exhaustion vector.
+  // The one call that carries a picture: the reviews screenshot saved with the first-message settings.
+  app.use("/api/trpc/settings.update", express.json({ limit: "2mb" }));
   app.use(express.json({ limit: "100kb" }));
 
   app.use("/api/trpc", rateLimit({ max: options.apiRateLimitPerMinute ?? ENV.apiRateLimitPerMinute }));

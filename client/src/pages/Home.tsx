@@ -2,6 +2,7 @@ import { lazy, Suspense } from "react";
 import { useLocation } from "wouter";
 import HomePage from "./HomePage";
 import JobPage from "./JobPage";
+import NotFound from "./NotFound";
 
 // One file per page. Everything but the landing page is loaded when it is first opened, so a visit downloads the
 // code for the pages it actually shows.
@@ -25,7 +26,8 @@ const pages = {
 export default function Home() {
   const [location] = useLocation();
   if (location.startsWith("/jobs/")) return <JobPage />;
+  if (location === "/") return <HomePage />;
   const Page = pages[location as keyof typeof pages];
-  if (!Page) return <HomePage />;
+  if (!Page) return <NotFound />;
   return <Suspense fallback={<div className="p-8 text-xs text-[#94A3B8]">Loading…</div>}><Page /></Suspense>;
 }

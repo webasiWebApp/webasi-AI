@@ -32,3 +32,14 @@ describe("reply language switches", () => {
     expect(matchFaqCache("do you provide hosting?", cache, { replyLanguages: { english: false, singlish: true, sinhala: true } })).toBeNull();
   });
 });
+
+describe("assistant voice", () => {
+  it("signs in with the owner's chosen name and copies the owner's style lines", () => {
+    const prompt = buildSystemPrompt(approvedRestaurantProject, {}, undefined, { assistantName: "Kasun", styleExamples: "Hi! Package eka LKR 25,000.\n\nDetails ewannada?\n" });
+    expect(prompt).toContain("You are Kasun, chatting on WhatsApp");
+    expect(prompt).toContain("Say your name (Kasun) once");
+    expect(prompt).toContain("Never claim to be human");
+    expect(prompt).toContain("- Hi! Package eka LKR 25,000.\n- Details ewannada?");
+    expect(buildSystemPrompt(approvedRestaurantProject, {})).not.toContain("HOW THIS TEAM WRITES");
+  });
+});

@@ -268,3 +268,21 @@ describe("the lock screen", () => {
     expect(JSON.parse((fetchMock.mock.calls[1] as unknown as [string, { body: string }])[1].body)).toEqual({ pin: "482915" });
   });
 });
+
+describe("the sidebar", () => {
+  it("counts what needs the owner and shows the real WhatsApp state", async () => {
+    await holder.db.pg.query("insert into conversations (client_id, wa_id, handed_over) values ('chat-1', '94770000001', true), ('chat-2', '94770000002', false)");
+    await (await import("../../server/data/drafts")).saveShadowDraft({ clientId: "chat-2", clientMessage: "price?", draft: "LKR 50,000" });
+    const { default: DashboardLayout } = await import("./components/DashboardLayout");
+    const { trpc } = await import("./lib/trpc");
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 0 } } });
+    render(
+      <trpc.Provider client={trpc.createClient({ links: [callerLink()] })} queryClient={queryClient}>
+        <QueryClientProvider client={queryClient}><Router hook={memoryLocation({ path: "/today", record: false }).hook}><DashboardLayout><div /></DashboardLayout></Router></QueryClientProvider>
+      </trpc.Provider>,
+    );
+    await waitFor(() => expect(screen.getAllByLabelText("1 waiting").length).toBe(2), { timeout: 8000 }); // one handed-over chat, one draft
+    expect(await screen.findByRole("button", { name: "WhatsApp offline" })).toBeTruthy();
+    expect(document.title).toBe("Today · WEBASI");
+  }, 30_000);
+});

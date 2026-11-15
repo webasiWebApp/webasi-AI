@@ -1,3 +1,4 @@
+import { DEFAULT_INTRO_MESSAGE } from "../../shared/intro";
 import { ENV } from "../_core/env";
 import { getSupabaseServer } from "../_core/supabase";
 import { approvedRestaurantProject } from "../conversations/project";
@@ -42,11 +43,11 @@ function mergeLedgerCategories(stored: unknown) {
 }
 
 async function loadSettings() {
-  if (!hasDatabase()) return { registrationNo: "", nextDocumentNumber: 9248, defaultAdvancePercent: 40, documentSettings: DEFAULT_DOCUMENT_SETTINGS, reminderSettings: DEFAULT_REMINDER_SETTINGS, ledgerCategories: mergeLedgerCategories(null), templateReviewDismissed: false, businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false, replyLanguages: mergeReplyLanguages(null) };
+  if (!hasDatabase()) return { registrationNo: "", nextDocumentNumber: 9248, defaultAdvancePercent: 40, documentSettings: DEFAULT_DOCUMENT_SETTINGS, reminderSettings: DEFAULT_REMINDER_SETTINGS, ledgerCategories: mergeLedgerCategories(null), templateReviewDismissed: false, businessName: approvedRestaurantProject.businessName, bankDetails: "", notificationEmail: null, whatsappMonthlyCap: 900, geminiDailyCap: 500, webasiEnabled: false, shadowMode: false, aiProvider: ENV.aiProvider, followupsEnabled: false, weeklySummaryEnabled: false, replyLanguages: mergeReplyLanguages(null), assistantName: "", styleExamples: "", introMessage: "", introImage: "" }; // no introduction without a database: tests and dry runs keep plain replies
   await ensureDefaults();
   const { data, error } = await getSupabaseServer().from("settings").select("*").eq("singleton_key", "owner").single();
   if (error) throw error;
-  return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false, registrationNo: (data.registration_no ?? "") as string, nextDocumentNumber: (data.next_document_number ?? 9248) as number, defaultAdvancePercent: (data.default_advance_percent ?? 40) as number, documentSettings: mergeDocumentSettings(data.document_settings), reminderSettings: mergeReminderSettings(data.reminder_settings), ledgerCategories: mergeLedgerCategories(data.ledger_categories), templateReviewDismissed: Boolean(data.template_review_dismissed), replyLanguages: mergeReplyLanguages(data.reply_languages) };
+  return { ...data, businessName: data.business_name, bankDetails: data.bank_details, notificationEmail: data.notification_email, whatsappMonthlyCap: data.whatsapp_monthly_cap, geminiDailyCap: data.gemini_daily_cap, webasiEnabled: Boolean(data.webasi_enabled), shadowMode: Boolean(data.shadow_mode), aiProvider: (data.ai_provider ?? ENV.aiProvider) as string, followupsEnabled: data.followups_enabled !== false, weeklySummaryEnabled: data.weekly_summary_enabled !== false, registrationNo: (data.registration_no ?? "") as string, nextDocumentNumber: (data.next_document_number ?? 9248) as number, defaultAdvancePercent: (data.default_advance_percent ?? 40) as number, documentSettings: mergeDocumentSettings(data.document_settings), reminderSettings: mergeReminderSettings(data.reminder_settings), ledgerCategories: mergeLedgerCategories(data.ledger_categories), templateReviewDismissed: Boolean(data.template_review_dismissed), replyLanguages: mergeReplyLanguages(data.reply_languages), assistantName: (data.assistant_name ?? "") as string, styleExamples: (data.style_examples ?? "") as string, introMessage: (data.intro_message ?? DEFAULT_INTRO_MESSAGE) as string, introImage: (data.intro_image ?? "") as string };
 }
 
 export async function getSettings() {
@@ -57,7 +58,7 @@ export async function getSettings() {
   return result;
 }
 
-export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean; registrationNo?: string; nextDocumentNumber?: number; defaultAdvancePercent?: number; documentSettings?: Record<string, unknown>; reminderSettings?: Record<string, unknown>; expenseCategories?: string[]; templateReviewDismissed?: boolean; replyLanguages?: ReplyLanguages }) {
+export async function updateSettings(input: { businessName?: string; bankDetails?: string; notificationEmail?: string | null; whatsappMonthlyCap?: number; geminiDailyCap?: number; webasiEnabled?: boolean; shadowMode?: boolean; followupsEnabled?: boolean; weeklySummaryEnabled?: boolean; registrationNo?: string; nextDocumentNumber?: number; defaultAdvancePercent?: number; documentSettings?: Record<string, unknown>; reminderSettings?: Record<string, unknown>; expenseCategories?: string[]; templateReviewDismissed?: boolean; replyLanguages?: ReplyLanguages; assistantName?: string; styleExamples?: string; introMessage?: string; introImage?: string }) {
   settingsCache.invalidate();
   invalidateProjectCaches(); // the compiled facts fall back to the business name from settings
   await ensureDefaults();
@@ -90,6 +91,10 @@ export async function updateSettings(input: { businessName?: string; bankDetails
   if (input.reminderSettings !== undefined) set.reminder_settings = { ...mergeReminderSettings(current?.reminder_settings), ...input.reminderSettings };
   if (input.expenseCategories !== undefined) set.ledger_categories = { expense: input.expenseCategories };
   if (input.templateReviewDismissed !== undefined) set.template_review_dismissed = input.templateReviewDismissed;
+  if (input.assistantName !== undefined) set.assistant_name = input.assistantName;
+  if (input.styleExamples !== undefined) set.style_examples = input.styleExamples;
+  if (input.introMessage !== undefined) set.intro_message = input.introMessage; // empty string means no introduction
+  if (input.introImage !== undefined) set.intro_image = input.introImage || null;
   const languagesBefore = mergeReplyLanguages(current?.reply_languages);
   if (input.replyLanguages !== undefined) set.reply_languages = mergeReplyLanguages(input.replyLanguages);
   if (Object.keys(set).length > 0) {

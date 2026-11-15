@@ -2,7 +2,9 @@ import crypto from "node:crypto";
 import { ENV } from "../_core/env";
 import { appendTranscriptMessage, claimWhatsAppMessage, getConversation, getUsageCounts, incrementUsage, logMessage, saveConversation, TRANSCRIPT_LIMIT, type ConversationSnapshot, type TranscriptMessage } from "../db";
 import { nextOrderState, requiredOrderFields } from "../../shared/webasi";
-import { createConversationEngine, type StructuredReply } from "./engine";
+import { createConversationEngine, type AssistantVoice, type StructuredReply } from "./engine";
+import { classifySmallTalk, SMALL_TALK_REACTION, smallTalkReply } from "./small-talk";
+import { sendWhatsAppImage } from "../whatsapp/outbound";
 import type { ApprovedProjectSnapshot } from "./project";
 import { createWhatsAppSender, outboundCapAllows, type SendTextResult } from "./sender";
 import type { ParsedWhatsAppMessage } from "../webhooks/whatsapp";
@@ -18,10 +20,10 @@ import { mergeReplyLanguages, type ReplyLanguages } from "../../shared/languages
 let _cachedEngine: { project: ApprovedProjectSnapshot | null; provider: string; languages: string; engine: ReturnType<typeof createConversationEngine> } | null = null;
 let _lastUsageAlertAt = 0;
 
-function engineFor(project: ApprovedProjectSnapshot | null, provider: string, replyLanguages: ReplyLanguages) {
-  const languages = JSON.stringify(replyLanguages);
+function engineFor(project: ApprovedProjectSnapshot | null, provider: string, replyLanguages: ReplyLanguages, voice: AssistantVoice) {
+  const languages = JSON.stringify([replyLanguages, voice.assistantName, voice.styleExamples]);
   if (!_cachedEngine || _cachedEngine.project !== project || _cachedEngine.provider !== provider || _cachedEngine.languages !== languages) {
-    _cachedEngine = { project, provider, languages, engine: createConversationEngine({ project: project ?? undefined, provider, replyLanguages }) };
+    _cachedEngine = { project, provider, languages, engine: createConversationEngine({ project: project ?? undefined, provider, replyLanguages, voice }) };
   }
   return _cachedEngine.engine.runTurn;
 }
@@ -43,9 +45,12 @@ export type MessageProcessorDeps = {
   appendMessage?: typeof appendTranscriptMessage;
   saveShadowDraft?: typeof saveShadowDraft;
   getUsageCounts?: typeof getUsageCounts;
+  getSettings?: typeof getSettings;
   incrementUsage?: typeof incrementUsage;
   runEngine?: ReturnType<typeof createConversationEngine>["runTurn"];
   sendText?: (input: { to: string; body: string; humanize?: boolean }) => Promise<SendTextResult>;
+  react?: (input: { to: string; emoji: string }) => Promise<boolean>;
+  sendImage?: (input: { to: string; image: string; caption: string }) => Promise<SendTextResult>;
   // Called once WEBASI is about to write an AI reply, so the transport can show "typing…" while the client waits.
   onReplying?: () => unknown;
   now?: Date;
@@ -99,6 +104,9 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   const usage = deps.getUsageCounts ?? getUsageCounts;
   const increment = deps.incrementUsage ?? incrementUsage;
   const sendText = deps.sendText ?? (ENV.whatsappTransport === "baileys" ? (input) => baileysTransport.sendText(input) : createWhatsAppSender());
+  // The Cloud API path has no reaction support here, so such a message is logged and left unanswered, as before.
+  const react = deps.react ?? (ENV.whatsappTransport === "baileys" ? (input) => baileysTransport.react(input) : async () => false);
+  const sendImage = deps.sendImage ?? sendWhatsAppImage;
   const now = deps.now ?? new Date();
   const who = message.profileName ?? "a client";
 
@@ -112,7 +120,7 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   // The duplicate check and the three reads every turn needs are independent, so they share one round trip.
   const [claimed, settings, counts, activeProject] = await Promise.all([
     claim({ messageId: message.id, waId, messageType: message.type, clientId, body: textFor(message) || null }),
-    getSettings(),
+    (deps.getSettings ?? getSettings)(),
     usage(),
     getActiveProject(),
   ]);
@@ -162,6 +170,9 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   let structured: StructuredReply | null = null;
   let answeredFromFaqs = false;
   const incomingText = textFor(message);
+  // The client's own message is already in the transcript, so "nobody has replied yet" means a first contact.
+  const firstContact = !snapshot.recentMessages.some((entry) => entry.role !== "client");
+  const intro = firstContact && message.type === "text" && settings.introMessage.trim() ? settings.introMessage.trim() : null;
 
   if (message.type === "image" && snapshot.state === "awaiting_deposit") {
     snapshot.state = nextOrderState(snapshot.state, "slip_received");
@@ -192,6 +203,18 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       alert("WEBASI: no active project", `${who} messaged but no project is active, so WEBASI did not reply. Activate a project or reply yourself.`);
       return done("no_active_project");
     }
+    // ── Small talk ───────────────────────────────────────────────────────────
+    // "ok", "thanks", a thumbs up: a person taps a reaction, a goodbye gets three words. No AI, and nothing to
+    // say back to a client whose first message is just "hi", so the chat must already have an assistant reply.
+    const smallTalk = snapshot.recentMessages.some((entry) => entry.role === "assistant") ? classifySmallTalk(incomingText) : null;
+    if (smallTalk === "bye") {
+      replyText = smallTalkReply(snapshot.language, mergeReplyLanguages(settings.replyLanguages));
+      answeredFromFaqs = true;
+    } else if (smallTalk) {
+      event({ eventType: "small_talk", severity: "info", title: "Reacted without AI", detail: `'${incomingText.slice(0, 60)}' from ${who} got a ${SMALL_TALK_REACTION[smallTalk]} reaction.`, clientId });
+      if (settings.shadowMode) return done("small_talk_logged");
+      return done("small_talk_reaction", await react({ to: waId, emoji: SMALL_TALK_REACTION[smallTalk] }));
+    }
     // ── FAQ cache fast-path ──────────────────────────────────────────────────
     // Look the question up in the owner's FAQs and the generated client FAQs before touching the LLM.
     // Only while the conversation is still gathering information; from the deposit step on, every
@@ -207,12 +230,12 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
       // Cached answers above cost no AI request, so the daily AI limit only stops the turns that need one.
       if (counts.geminiRequests >= settings.geminiDailyCap) return usageStop("daily AI");
       try {
-        const runEngine = deps.runEngine ?? engineFor(project, settings.aiProvider, mergeReplyLanguages(settings.replyLanguages));
+        const runEngine = deps.runEngine ?? engineFor(project, settings.aiProvider, mergeReplyLanguages(settings.replyLanguages), { assistantName: settings.assistantName, styleExamples: settings.styleExamples });
         if (!settings.shadowMode && deps.onReplying) later("typing indicator", deps.onReplying());
         structured = await runEngine({
           clientId, state: snapshot.state, missingFields: snapshot.missingFields, recentMessages: snapshot.recentMessages.slice(0, -1).map(({ role, text }) => ({ role, text })),
           incomingText, isOn, withinCustomerWindow: true, monthlyOutbound: counts.outboundWhatsApp, monthlyCap: settings.whatsappMonthlyCap,
-          clientName: snapshot.extractedFields.clientName ?? message.profileName, clientNotes: snapshot.clientNotes, knownFields: snapshot.extractedFields, daysSinceLastMessage, now,
+          clientName: snapshot.extractedFields.clientName ?? message.profileName, clientNotes: snapshot.clientNotes, knownFields: snapshot.extractedFields, daysSinceLastMessage, now, introduced: Boolean(intro),
         });
         later("usage counter", increment("geminiRequests"));
         replyText = structured.reply;
@@ -292,6 +315,16 @@ export async function processWhatsAppMessage(message: ParsedWhatsAppMessage, dep
   }
 
   if (!replyText) return done("no_reply");
+
+  if (intro) {
+    // The reviews screenshot carries the introduction as its caption, then the answer follows as text. Without a
+    // screenshot, or if it could not be sent, the introduction is the first bubble of the reply.
+    const pictured = !settings.shadowMode && settings.introImage ? await sendImage({ to: waId, image: settings.introImage, caption: intro }).catch((): SendTextResult => ({ accepted: false })) : { accepted: false };
+    if (pictured.accepted) {
+      remember({ role: "assistant", text: `📷 ${intro}`, at: new Date().toISOString() });
+      later("usage counter", increment("outboundWhatsApp"));
+    } else replyText = `${intro}\n\n${replyText}`;
+  }
 
   if (settings.shadowMode) {
     event({ eventType: "shadow_draft", severity: "info", title: "Shadow-mode draft created", detail: replyText, clientId });

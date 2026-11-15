@@ -154,6 +154,13 @@ describe("model output tolerance", () => {
     expect(result.needsOwner).toBe(false);
   });
 
+  it("does not spend a second Groq call on unusable output", async () => {
+    const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: "not json" } }] });
+    const result = await createConversationEngine({ callModel, provider: "groq" }).runTurn({ ...baseTurn, incomingText: "Can I send the logo later?" });
+    expect(callModel).toHaveBeenCalledOnce();
+    expect(result.needsOwner).toBe(true);
+  });
+
   it("reports unusable output as such when the second try fails too", async () => {
     const callModel = vi.fn().mockResolvedValue({ choices: [{ message: { content: "not json" } }] });
     const result = await createConversationEngine({ callModel }).runTurn({ ...baseTurn, incomingText: "Hi" });

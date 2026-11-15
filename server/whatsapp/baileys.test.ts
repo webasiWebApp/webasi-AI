@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { baileysStatusCode, createDebouncer, waIdFromJid, splitIntoBubbles, typingDelayMs, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus } from "./baileys";
+import { baileysStatusCode, createDebouncer, waIdFromJid, splitIntoBubbles, typingDelayMs, canSendBaileysMessage, normalizeBaileysPhone, resetBaileysStatus, shouldIgnoreBaileysMessage, startupFailureStatus, quietHoursDelayMs, bubbleGapMs } from "./baileys";
 
 describe("Baileys transport safety helpers", () => {
   it("normalizes pairing numbers to digits with country code", () => {
@@ -20,6 +20,12 @@ describe("Baileys transport safety helpers", () => {
   });
   it("surfaces startup authentication failures as reconnect-required without deleting state", () => {
     expect(startupFailureStatus(new Error("Unsupported state or unable to authenticate data"))).toEqual({ status: "reconnect_required", lastError: "Unsupported state or unable to authenticate data" });
+  });
+  it("waits longer at night and pauses unevenly between bubbles", () => {
+    expect(quietHoursDelayMs(new Date("2026-11-14T17:30:00Z"), () => 0)).toBe(15000); // 23:00 in Colombo
+    expect(quietHoursDelayMs(new Date("2026-11-14T01:00:00Z"), () => 1)).toBe(40000); // 06:30
+    expect(quietHoursDelayMs(new Date("2026-11-14T04:00:00Z"))).toBe(0); // 09:30
+    expect(bubbleGapMs(() => 0.5)).toBe(1500);
   });
   it("returns to a clean disconnected state before pairing again", () => {
     expect(resetBaileysStatus()).toEqual({ status: "disconnected", lastError: undefined });
@@ -43,6 +49,16 @@ describe("Inbound text debouncer", () => {
     expect(flushed).toEqual([]);
     vi.advanceTimersByTime(1);
     expect(flushed).toEqual([["a", ["hi", "price?"]], ["b", ["hello"]]]);
+    vi.useRealTimers();
+  });
+  it("flushes sooner when the last push asks for it", () => {
+    vi.useFakeTimers();
+    const flushed: string[][] = [];
+    const debouncer = createDebouncer<string>((_key, items) => flushed.push(items), 1000);
+    debouncer.push("a", "hi");
+    debouncer.push("a", "price?", 500);
+    vi.advanceTimersByTime(500);
+    expect(flushed).toEqual([["hi", "price?"]]);
     vi.useRealTimers();
   });
   it("take() returns pending items immediately and cancels the timer", () => {

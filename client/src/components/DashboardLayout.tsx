@@ -5,6 +5,7 @@ import {
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -37,6 +38,16 @@ import { CSSProperties, useEffect, useState } from "react";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { useIsMobile } from "@/hooks/useMobile";
+import { trpc } from "@/lib/trpc";
+
+// The same three words everywhere the shell shows the WhatsApp link: green only when messages can flow.
+const whatsappTone: Record<string, { label: string; color: string }> = {
+  connected: { label: "WhatsApp connected", color: "#22C55E" },
+  pairing: { label: "WhatsApp pairing", color: "#F59E0B" },
+  connecting: { label: "WhatsApp connecting", color: "#F59E0B" },
+  reconnecting: { label: "WhatsApp reconnecting", color: "#F59E0B" },
+};
+const whatsappOffline = { label: "WhatsApp offline", color: "#EF4444" };
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Home", path: "/" },
@@ -79,8 +90,23 @@ function DashboardLayoutContent({ children, onLock }: { children: React.ReactNod
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const isMobile = useIsMobile();
-  const activeMenuItem = menuItems.find((item) => item.path === location) ?? menuItems[0];
-  void activeMenuItem;
+  const activeMenuItem = menuItems.find((item) => item.path === location || (item.path === "/pipeline" && location.startsWith("/jobs/")));
+  useEffect(() => { document.title = activeMenuItem ? `${activeMenuItem.label} · WEBASI` : "WEBASI"; }, [activeMenuItem]);
+  // What needs the owner right now, shown beside the menu item that handles it. The pages poll the same queries, so
+  // react-query serves both from one request.
+  const whatsapp = trpc.whatsapp.status.useQuery(undefined, { refetchInterval: 15000, retry: false });
+  const conversations = trpc.dashboard.conversations.useQuery(undefined, { refetchInterval: 30000, retry: false });
+  const drafts = trpc.shadowDrafts.list.useQuery(undefined, { refetchInterval: 30000, retry: false });
+  const badges: Record<string, number> = {
+    "/conversations": (conversations.data ?? []).filter((row) => row.needsOwner).length,
+    "/drafts": drafts.data?.length ?? 0,
+  };
+  const tone = whatsapp.data ? whatsappTone[whatsapp.data.status] ?? whatsappOffline : null;
+  const statusPill = tone && (
+    <button onClick={() => setLocation("/connect-whatsapp")} className="flex items-center gap-1.5 rounded-lg px-1.5 py-1 text-[11px] font-medium text-[#64748B] transition hover:bg-[#F8FAFC]" aria-label={tone.label}>
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ backgroundColor: tone.color }} /><span className="group-data-[collapsible=icon]:hidden">{tone.label}</span>
+    </button>
+  );
   const displayName = "WEBASI owner";
   const displayEmail = "Local workspace";
   const initials = displayName.split(" ").map((part) => part[0]).slice(0, 2).join("").toUpperCase();
@@ -123,6 +149,7 @@ function DashboardLayoutContent({ children, onLock }: { children: React.ReactNod
                     <item.icon className={`h-[17px] w-[17px] shrink-0 ${isActive ? "text-[#2563FF]" : "text-[#94A3B8]"}`} />
                     <span className="flex-1">{item.label}</span>
                   </SidebarMenuButton>
+                  {badges[item.path] > 0 && <SidebarMenuBadge className="rounded-full bg-[#FEE2E2] text-[10px] font-bold text-[#B91C1C]" aria-label={`${badges[item.path]} waiting`}>{badges[item.path]}</SidebarMenuBadge>}
                 </SidebarMenuItem>
               );
             })}
@@ -130,6 +157,7 @@ function DashboardLayoutContent({ children, onLock }: { children: React.ReactNod
         </SidebarContent>
 
         <SidebarFooter className="border-t border-[#E2E8F0] p-3">
+          {statusPill}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button className="flex w-full items-center gap-3 rounded-xl p-2 text-left transition hover:bg-[#F8FAFC] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#2563FF] group-data-[collapsible=icon]:justify-center">
@@ -153,7 +181,7 @@ function DashboardLayoutContent({ children, onLock }: { children: React.ReactNod
         {isMobile && (
           <div className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-[#E2E8F0] bg-white/95 px-4 backdrop-blur">
             <div className="flex items-center gap-3"><SidebarTrigger className="h-9 w-9 rounded-lg border border-[#E2E8F0] bg-white" /><div className="flex items-center gap-2"><div className="flex h-6 w-6 items-center justify-center rounded-md bg-[#2563FF] text-[10px] font-bold text-white">W</div><span className="text-sm font-bold tracking-[-0.02em] text-[#0F172A]">WEBASI</span></div></div>
-            <div className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-[#22C55E]" /><span className="text-[11px] font-medium text-[#64748B]">Live</span>{onLock && <button onClick={onLock} aria-label="Lock dashboard" className="ml-2 flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#64748B]"><LockKeyhole className="h-4 w-4" /></button>}</div>
+            <div className="flex items-center gap-1.5">{statusPill}{onLock && <button onClick={onLock} aria-label="Lock dashboard" className="ml-2 flex h-8 w-8 items-center justify-center rounded-lg border border-[#E2E8F0] text-[#64748B]"><LockKeyhole className="h-4 w-4" /></button>}</div>
           </div>
         )}
         <main className="min-h-screen">{children}</main>

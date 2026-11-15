@@ -176,8 +176,8 @@ describe("inbound messages", () => {
     const socket = await connected();
     await deliver(socket, [inbound("m1", "hi")]);
     await tick(1000);
-    await deliver(socket, [inbound("m2", "price?")]);
-    await tick(3999);
+    await deliver(socket, [inbound("m2", "price?")]); // ends in "?", so the wait is halved
+    await tick(1999);
     expect(world.process).not.toHaveBeenCalled();
     await tick(2);
     expect(world.process).toHaveBeenCalledOnce();

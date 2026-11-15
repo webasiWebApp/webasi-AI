@@ -1,3 +1,4 @@
+import { INTRO_IMAGE_MAX_CHARS } from "../shared/intro";
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
 import { publicProcedure, protectedProcedure, router } from "./_core/trpc";
@@ -8,7 +9,7 @@ import { analyzeInsights, setInsightStatus, approveProject, activateProject, cre
 import { baileysTransport } from "./whatsapp/baileys";
 import { outboundCapAllows } from "./conversations/sender";
 import { sendWhatsAppText } from "./whatsapp/outbound";
-import { sendWeeklySummary, weeklySummaryText } from "./automation";
+import { sendManualFollowUp, sendWeeklySummary, weeklySummaryText } from "./automation";
 import { createConversationEngine, type StructuredReply } from "./conversations/engine";
 import { matchFaqCache } from "./conversations/faq-cache";
 import { instantAnswersFor, instantReplyText } from "./conversations/faq-generator";
@@ -32,7 +33,7 @@ export const appRouter = router({
     settings: protectedProcedure.query(() => getSettings()),
   }),
   settings: router({
-    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional(), registrationNo: z.string().trim().max(60).optional(), nextDocumentNumber: z.number().int().min(1).max(99_999_999).optional(), defaultAdvancePercent: z.number().int().min(1).max(100).optional(), documentSettings: documentSettingsPatch.optional(), reminderSettings: reminderSettingsPatch.optional(), expenseCategories: z.array(z.string().trim().min(1).max(40)).min(1).max(30).optional(), templateReviewDismissed: z.boolean().optional(), replyLanguages: z.object({ english: z.boolean(), singlish: z.boolean(), sinhala: z.boolean() }).refine((languages) => languages.english || languages.singlish || languages.sinhala, "Keep at least one reply language on.").optional() })).mutation(({ input }) => updateSettings(input)),
+    update: protectedProcedure.input(z.object({ businessName: z.string().min(1).optional(), bankDetails: z.string().optional(), notificationEmail: z.string().email().nullable().optional(), whatsappMonthlyCap: z.number().int().min(1).max(10000).optional(), geminiDailyCap: z.number().int().min(1).max(10000).optional(), webasiEnabled: z.boolean().optional(), shadowMode: z.boolean().optional(), followupsEnabled: z.boolean().optional(), weeklySummaryEnabled: z.boolean().optional(), registrationNo: z.string().trim().max(60).optional(), nextDocumentNumber: z.number().int().min(1).max(99_999_999).optional(), defaultAdvancePercent: z.number().int().min(1).max(100).optional(), documentSettings: documentSettingsPatch.optional(), reminderSettings: reminderSettingsPatch.optional(), expenseCategories: z.array(z.string().trim().min(1).max(40)).min(1).max(30).optional(), templateReviewDismissed: z.boolean().optional(), replyLanguages: z.object({ english: z.boolean(), singlish: z.boolean(), sinhala: z.boolean() }).refine((languages) => languages.english || languages.singlish || languages.sinhala, "Keep at least one reply language on.").optional(), assistantName: z.string().trim().max(40).optional(), styleExamples: z.string().trim().max(2000).optional(), introMessage: z.string().trim().max(1500).optional(), introImage: z.string().max(INTRO_IMAGE_MAX_CHARS, "The screenshot is too large.").refine((value) => value === "" || value.startsWith("data:image/"), "Upload an image file.").optional() })).mutation(({ input }) => updateSettings(input)),
     updateProvider: protectedProcedure.input(z.object({ provider: z.enum(["gemini", "groq"]) })).mutation(({ input }) => setAiProvider(input.provider)),
   }),
   projects: router({
@@ -69,6 +70,7 @@ export const appRouter = router({
       await recordEvent({ eventType: "dashboard_owner_message", severity: "info", title: "Owner message sent", detail: `Owner sent a dashboard message to ${conversation.profileName ?? conversation.waId}.`, clientId: input.clientId });
       return { accepted: true, messageId: result.messageId };
     }),
+    sendFollowUp: protectedProcedure.input(z.object({ clientId: key })).mutation(({ input }) => sendManualFollowUp(input.clientId)),
   }),
   // Replies written in shadow mode: the owner sends them as they are, edits them first, or discards them.
   shadowDrafts: router({
@@ -110,7 +112,7 @@ export const appRouter = router({
       const settings = await getSettings();
       const instant = ["new", "collecting"].includes(input.state) ? matchFaqCache(input.incomingText, instantAnswersFor(snapshot), { englishForSinglish: ENV.faqEnglishForSinglish, replyLanguages: settings.replyLanguages }) : null;
       if (instant) return { reply: instantReplyText(instant, snapshot), extractedFields: {}, intent: "question", needsOwner: false, needsOwnerReason: null, reliedOnFacts: [], answeredFromFaqs: true };
-      return createConversationEngine({ project: snapshot, provider: settings.aiProvider, replyLanguages: settings.replyLanguages }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
+      return createConversationEngine({ project: snapshot, provider: settings.aiProvider, replyLanguages: settings.replyLanguages, voice: { assistantName: settings.assistantName, styleExamples: settings.styleExamples } }).runTurn({ clientId: "test-chat-sandbox", state: input.state, missingFields: [], recentMessages: input.recentMessages, incomingText: input.incomingText, isOn: true, withinCustomerWindow: true, monthlyOutbound: 0, monthlyCap: 900, clientNotes: input.clientNotes });
     }),
   }),
   whatsapp: router({

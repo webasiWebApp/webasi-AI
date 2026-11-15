@@ -28,7 +28,7 @@ export function createDebouncer<T>(onFlush: (key: string, items: T[]) => void, d
   const pending = new Map<string, { items: T[]; timer: ReturnType<typeof setTimeout> }>();
   const take = (key: string): T[] => { const entry = pending.get(key); if (!entry) return []; clearTimeout(entry.timer); pending.delete(key); return entry.items; };
   return {
-    push(key: string, item: T) { const items = [...take(key), item]; pending.set(key, { items, timer: setTimeout(() => onFlush(key, take(key)), delayMs) }); },
+    push(key: string, item: T, delay = delayMs) { const items = [...take(key), item]; pending.set(key, { items, timer: setTimeout(() => onFlush(key, take(key)), delay) }); },
     take,
   };
 }
@@ -44,6 +44,14 @@ export function splitIntoBubbles(body: string, maxParts = 3) {
 }
 // Roughly how long a person takes to type a message: a short pause plus ~35ms per character, capped.
 export function typingDelayMs(text: string) { return Math.min(7000, Math.max(1500, 1000 + text.length * 35)); }
+// A person pauses unevenly between messages; a fixed rhythm reads as a bot.
+export function bubbleGapMs(random = Math.random) { return 1000 + Math.round(random() * 1000); }
+// Late at night nobody answers in four seconds. Between 22:00 and 07:00 Colombo time the reply waits a while longer.
+const colomboHour = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Colombo", hour: "2-digit", hour12: false });
+export function quietHoursDelayMs(now: Date, random = Math.random) {
+  const hour = Number(colomboHour.format(now)) % 24;
+  return hour >= 22 || hour < 7 ? 15000 + Math.round(random() * 25000) : 0;
+}
 export function resetBaileysStatus(): Pick<BaileysStatus, "status" | "lastError"> { return { status: "disconnected", lastError: undefined }; }
 
 const OFFLINE_BACKFILL_MS = 24 * 60 * 60 * 1000;
@@ -212,7 +220,8 @@ class BaileysTransport {
       const type = image ? "image" : text ? "text" : content.audioMessage ? "audio" : content.reactionMessage ? "reaction" : content.stickerMessage ? "sticker" : "unsupported";
       if (type === "reaction") return;
       const parsed: ParsedWhatsAppMessage = { id: message.key.id ?? `${waId}-${Date.now()}`, from: waId, waId, profileName: message.pushName ?? undefined, type, text: text ? { body: text } : undefined, image: image ? { id: message.key.id ?? undefined, caption: image.caption ?? undefined, mime_type: image.mimetype ?? undefined } : undefined };
-      if (type === "text") { this.textBuffer.push(waId, { parsed, remoteJid }); return; }
+      // A message that ends in a question mark is finished; the wait for a follow-up line is halved.
+      if (type === "text") { this.textBuffer.push(waId, { parsed, remoteJid }, /\?\s*$/.test(text ?? "") ? INBOUND_TEXT_DEBOUNCE_MS / 2 : undefined); return; }
       await this.processBatch(this.textBuffer.take(waId));
       await this.processBatch([{ parsed, remoteJid }]);
     } catch (error) {
@@ -232,13 +241,33 @@ class BaileysTransport {
   // Blue ticks and "typing…" as soon as WEBASI starts on a reply, rather than only after the AI has finished writing it.
   private async showTyping(jid: string) {
     const socket = this.socket;
-    if (!socket || this.status !== "connected") return;
+    // At night the reply itself waits (sendText), so blue ticks and "typing…" wait with it.
+    if (!socket || this.status !== "connected" || quietHoursDelayMs(new Date()) > 0) return;
     const key = this.lastInboundKey.get(jid);
     if (key) await socket.readMessages([key]).catch(() => undefined);
     await socket.sendPresenceUpdate("available").catch(() => undefined);
     await socket.presenceSubscribe(jid).catch(() => undefined);
     await socket.sendPresenceUpdate("composing", jid).catch(() => undefined);
     this.typingSince.set(jid, Date.now());
+  }
+
+  // A reaction on the client's last message: what a person does with "ok" or "thanks" instead of writing back.
+  async react(input: { to: string; emoji: string }): Promise<boolean> {
+    const socket = this.socket;
+    if (!socket || this.status !== "connected") return false;
+    const jid = input.to.includes("@") ? input.to : `${input.to}@s.whatsapp.net`;
+    const key = this.lastInboundKey.get(jid);
+    if (!key) return false;
+    try {
+      await sleep(quietHoursDelayMs(new Date()) + 1500 + Math.round(Math.random() * 2500)); // a glance before the tap
+      await socket.readMessages([key]).catch(() => undefined);
+      const sent = await socket.sendMessage(jid, { react: { text: input.emoji, key } });
+      if (sent?.key?.id) this.sentIds.add(sent.key.id);
+      return true;
+    } catch (error) {
+      console.error("[Baileys] reaction failed", error instanceof Error ? error.message : error);
+      return false;
+    }
   }
 
   async startPairing() {
@@ -270,6 +299,29 @@ class BaileysTransport {
     }
   }
 
+  // One picture with a caption, paced like a typed message. `image` is a data URL from Settings.
+  async sendImage(input: { to: string; image: string; caption: string }): Promise<BaileysSendResult> {
+    const socket = this.socket;
+    if (!socket || this.status !== "connected") return { accepted: false, reason: "baileys_not_connected" };
+    const match = /^data:(image\/[\w.+-]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(input.image);
+    if (!match) return { accepted: false, reason: "intro_image_invalid" };
+    const jid = input.to.includes("@") ? input.to : `${input.to}@s.whatsapp.net`;
+    try {
+      await sleep(quietHoursDelayMs(new Date()));
+      const key = this.lastInboundKey.get(jid);
+      if (key) await socket.readMessages([key]).catch(() => undefined);
+      await socket.sendPresenceUpdate("composing", jid).catch(() => undefined);
+      await sleep(typingDelayMs(input.caption));
+      const sent = await socket.sendMessage(jid, { image: Buffer.from(match[2], "base64"), mimetype: match[1], caption: input.caption });
+      if (sent?.key?.id) this.sentIds.add(sent.key.id);
+      this.recentSends.set(jid, [...(this.recentSends.get(jid) ?? []), Date.now()]);
+      return { accepted: true, messageId: sent?.key?.id ?? undefined, parts: 1 };
+    } catch (error) {
+      console.error("[Baileys] image send failed", error instanceof Error ? error.message : error);
+      return { accepted: false, reason: `send_failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
   // humanize: mark the client's message read, show "typing…" for a realistic time, and send short bubbles.
   async sendText(input: { to: string; body: string; humanize?: boolean }): Promise<BaileysSendResult> {
     if (!this.socket || this.status !== "connected") return { accepted: false, reason: "baileys_not_connected" };
@@ -283,6 +335,7 @@ class BaileysTransport {
     const alreadyTypingSince = typingStarted && Date.now() - typingStarted < 30_000 ? typingStarted : undefined;
     try {
       const socket = this.socket;
+      if (input.humanize) await sleep(quietHoursDelayMs(new Date()));
       if (input.humanize && !alreadyTypingSince) {
         const key = this.lastInboundKey.get(jid);
         if (key) await socket.readMessages([key]).catch(() => undefined);
@@ -292,6 +345,7 @@ class BaileysTransport {
       for (const [index, part] of parts.entries()) {
         const last = recent.at(-1);
         if (!canSendBaileysMessage(recent, Date.now()) && last) await sleep(Math.max(0, 2500 - (Date.now() - last)));
+        if (input.humanize && index > 0) await sleep(bubbleGapMs());
         await socket.presenceSubscribe(jid).catch(() => undefined);
         await socket.sendPresenceUpdate("composing", jid);
         // The first bubble has been "typed" for as long as the AI took, so only the remainder is waited out.
