@@ -5,7 +5,7 @@ import { colomboDate } from "../../shared/time";
 import { hasDatabase } from "./core";
 import { dbError, refuse, requireDb } from "./errors";
 import { recordEvent } from "./events";
-import { listLedger } from "./ledger";
+import { listLedger, type LedgerEntry } from "./ledger";
 
 export const mapJob = (row: any) => ({
   id: row.id as string, conversationClientId: (row.conversation_client_id ?? null) as string | null, clientName: row.client_name as string, clientPhone: (row.client_phone ?? "") as string,
@@ -31,9 +31,14 @@ async function mustGetJob(id: string): Promise<Job> {
   return (await getJob(id)) ?? refuse("NOT_FOUND", "That job does not exist.");
 }
 
+// Reads only job-linked entries (one job's when there is one job) and hands each job its own, instead of scanning the
+// whole ledger once per job. shortcut: still capped at listLedger's 5000 rows; page or sum in SQL past that.
 async function withMoney(jobs: Job[]): Promise<JobWithMoney[]> {
-  const entries = jobs.length ? (await listLedger({})).filter((entry) => entry.jobId) : [];
-  return jobs.map((job) => ({ ...job, money: jobMoney(job, entries, job.advancePercent), nextAction: nextAction(job.stage) }));
+  if (!jobs.length) return [];
+  const entries = await listLedger(jobs.length === 1 ? { jobId: jobs[0].id } : { jobLinked: true });
+  const byJob = new Map<string, LedgerEntry[]>();
+  for (const entry of entries) if (entry.jobId) { const list = byJob.get(entry.jobId); if (list) list.push(entry); else byJob.set(entry.jobId, [entry]); }
+  return jobs.map((job) => ({ ...job, money: jobMoney(job, byJob.get(job.id) ?? [], job.advancePercent), nextAction: nextAction(job.stage) }));
 }
 
 export async function listJobs(): Promise<JobWithMoney[]> {
@@ -46,8 +51,7 @@ export async function listJobs(): Promise<JobWithMoney[]> {
 export async function getJobDetail(id: string): Promise<(JobWithMoney & { unfinishedTasks: number }) | null> {
   const job = await getJob(id);
   if (!job) return null;
-  const [withMoneyRow] = await withMoney([job]);
-  const { data, error } = await supabase().from("job_tasks").select("id").eq("job_id", id).neq("status", "done");
+  const [[withMoneyRow], { data, error }] = await Promise.all([withMoney([job]), supabase().from("job_tasks").select("id").eq("job_id", id).neq("status", "done")]);
   if (error) throw error;
   return { ...withMoneyRow, unfinishedTasks: (data ?? []).length };
 }

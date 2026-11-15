@@ -17,10 +17,11 @@ export type LedgerEntry = ReturnType<typeof mapEntry>;
 
 export type RecordEntryInput = { jobId?: string | null; type: "income" | "expense"; category: string; amount: number; entryDate?: string; method?: string; note?: string; invoiceDocumentId?: string | null; replacesEntryId?: string | null; idempotencyKey?: string };
 
-export async function listLedger(filter: { jobId?: string; from?: string; to?: string; includeVoid?: boolean; limit?: number } = {}): Promise<LedgerEntry[]> {
+export async function listLedger(filter: { jobId?: string; jobLinked?: boolean; from?: string; to?: string; includeVoid?: boolean; limit?: number } = {}): Promise<LedgerEntry[]> {
   if (!hasDatabase()) return [];
   let query = getSupabaseServer().from("ledger_entries").select("*");
   if (filter.jobId) query = query.eq("job_id", filter.jobId);
+  else if (filter.jobLinked) query = query.not("job_id", "is", null);
   if (filter.from) query = query.gte("entry_date", filter.from);
   if (filter.to) query = query.lte("entry_date", filter.to);
   if (!filter.includeVoid) query = query.is("voided_at", null);
